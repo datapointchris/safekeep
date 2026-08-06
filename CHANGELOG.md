@@ -1,6 +1,70 @@
 # CHANGELOG
 
 
+## v0.3.0 (2026-08-06)
+
+### Bug Fixes
+
+- **backup**: Record the mode of the source directory itself
+  ([`dd888ea`](https://github.com/datapointchris/safekeep/commit/dd888ea39531bdefc5678b7309d7c216b072c7b9))
+
+survey_tree skipped the root of every path it walked, so ~/.ssh and ~/.config/gnupg were the two
+  directories in the tree whose 0700 nothing wrote down. A rebuild recreated them at the 0755
+  default and gpg refuses a homedir anyone can read.
+
+Snapshots already taken have no mode for their source roots and will keep restoring them at the
+  default; the next backup records them.
+
+### Build System
+
+- Skip the subprocess bandit checks
+  ([`3ede69b`](https://github.com/datapointchris/safekeep/commit/3ede69bb1116367fef7793af2e038f8f72696fe7))
+
+safekeep runs git, rsync and fzf by name. B404, B603 and B607 fire on every one of those calls,
+  which is the whole tool, so `task lint` failed on findings that will never be actionable. Skipped
+  in config rather than at each call site.
+
+### Documentation
+
+- Stop promising anything about pre-version-2 snapshots
+  ([`2415ebc`](https://github.com/datapointchris/safekeep/commit/2415ebc7cd59f778e35e1d5f9ad091fe63ebd6e1))
+
+The file lists are a property of what a backup writes now. Carrying a documented guarantee about the
+  snapshots taken before them means every later change has to be weighed against a format nobody is
+  going to restore from again.
+
+Nothing is removed from the reading path: file_kinds already reaches for 'paths' with a default,
+  which is ordinary dict access rather than a compatibility branch, and a manifest without them
+  restores unlabelled because there is nothing to label with.
+
+### Features
+
+- **restore**: Name every file, and speak in sources
+  ([`0cf0a73`](https://github.com/datapointchris/safekeep/commit/0cf0a73bf8cfd1f10ab40defa4597cf0b081eb3f))
+
+A restore said "3 files" and then nothing for minutes, and it called the things it restored "groups"
+  — a manifest word for a (kind, source) pair, which meant a repo appeared twice in the picker while
+  restoring once, and the header and the summary counted in different units under one name.
+
+Restore now walks the snapshot's own subtree for each source. That one list drives everything:
+
+- Every file is named as rsync writes it, marked + for new and ~ for replaced, with the kind beside
+  a repo's files so an ignored one is distinguishable from an untracked one. Manifest version 2
+  records the file lists on the git groups to make that possible; version 1 snapshots restore
+  unlabelled. - The mode pass no longer walks the target. It used to chmod every path under a
+  restored directory — for a repo, the entire working tree — and applied the default 0644 to tracked
+  files the manifest had never seen, stripping +x off files a clone had just put back. Restoring 2
+  untracked files touched 52 paths in a fixture and 11139 on a real machine. It now applies the
+  recorded deviations, and the defaults only to paths the restore created. - Conflicts are visible:
+  the default policy says which files it replaced and kept a .pre-restore copy of, and --on-conflict
+  ask names each existing file and waits for a decision, keeping no copies. - The picker offers one
+  row per source, sorted by path, previewing the files that source holds rather than an ls of its
+  top level.
+
+--group is now --source everywhere; the old spelling still parses. The progress flag goes: the file
+  lines are the progress signal, and interleaving progress2's redraws with them served neither.
+
+
 ## v0.2.0 (2026-08-06)
 
 ### Documentation
