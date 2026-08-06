@@ -348,6 +348,37 @@ def test_survey_records_only_mode_deviations(source_tree):
     assert safekeep.snapshot_rel(source_tree / 'notes' / 'plain.md') not in modes
 
 
+def test_survey_records_the_source_directory_itself(tmp_path):
+    """~/.ssh and ~/.config/gnupg are 0700, and the source root's own mode used to be the one
+    path the survey skipped — so a rebuild recreated them at the 0755 default and gpg refused a
+    homedir anyone could read."""
+    private = tmp_path / 'gnupg'
+    private.mkdir()
+    private.chmod(0o700)
+    (private / 'pubring.kbx').write_text('keys\n')
+
+    survey = safekeep.survey_tree(private, [], None)
+    assert survey['modes'][safekeep.snapshot_rel(private)] == '0700'
+
+
+def test_restore_recreates_a_private_directory_at_its_own_mode(tmp_path):
+    """The round trip of the above, through a destination that cannot store modes at all."""
+    dest = tmp_path / 'dest'
+    target = tmp_path / 'target'
+    private = tmp_path / 'gnupg'
+    private.mkdir()
+    private.chmod(0o700)
+    (private / 'pubring.kbx').write_text('keys\n')
+
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(private))
+    run_safekeep('--config', str(config_path), 'backup')
+    flatten_modes(next(d for d in dest.iterdir() if d.is_dir()))
+
+    result = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE((target / safekeep.snapshot_rel(private)).stat().st_mode) == 0o700
+
+
 def test_survey_honours_excludes(source_tree):
     survey = safekeep.survey_tree(source_tree / 'notes', safekeep.DEFAULT_SKIP_NAMES, None)
     assert not any('.venv' in key for key in survey['modes'])

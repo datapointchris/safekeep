@@ -512,7 +512,11 @@ def survey_tree(root, excludes, max_size_mb):
             dir_mode = current.stat().st_mode & 0o777
         except OSError:
             dir_mode = DEFAULT_DIR_MODE
-        if dir_mode != DEFAULT_DIR_MODE and current != root:
+        # The source's own directory is recorded like any other. Excluding it meant a restore
+        # created ~/.ssh and ~/.config/gnupg at the 0755 default, and gpg refuses a homedir
+        # anyone can read -- the one mode in the tree that most had to survive was the one
+        # nothing wrote down.
+        if dir_mode != DEFAULT_DIR_MODE:
             survey['modes'][snapshot_rel(current)] = f'{dir_mode:04o}'
 
         for name in dirnames:
