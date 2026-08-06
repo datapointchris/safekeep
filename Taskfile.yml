@@ -1,0 +1,42 @@
+version: "3"
+
+tasks:
+  default:
+    desc: Run the test suite (default)
+    cmds:
+      - task: test
+
+  test:
+    desc: Run all tests
+    cmds:
+      - uv run pytest
+
+  test:coverage:
+    desc: Run tests with an HTML coverage report
+    cmds:
+      - uv run pytest --cov=safekeep --cov-report=html --cov-report=term
+      - echo "Coverage report{{":"}} htmlcov/index.html"
+
+  lint:
+    desc: Run ruff, mypy, and bandit
+    cmds:
+      - uv run ruff format --check .
+      - uv run ruff check .
+      - uv run mypy src
+      - uv run bandit -c pyproject.toml -r src
+
+  fix:
+    desc: Apply ruff formatting and autofixes
+    cmds:
+      - uv run ruff format .
+      - uv run ruff check --fix .
+
+  build:
+    desc: Build the wheel and sdist
+    cmds:
+      - uv build
+
+  clean:
+    desc: Remove build and coverage artifacts
+    cmds:
+      - rm -rf dist htmlcov .coverage coverage.xml

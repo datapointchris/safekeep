@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # python-semantic-release decides the version from the commit types, writes it
+  # into pyproject.toml, tags, and creates the GitHub release.
+  #
+  # There is no publish job. safekeep is installed from this repo with uv, and
+  # the private index is the next channel; nothing goes to public PyPI. The tag
+  # is what an install resolves against.
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: python-semantic-release/python-semantic-release@v9
+        id: release
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
