@@ -97,8 +97,7 @@ SINGLE_TAG_EXAMPLE = 'tags = ["wsl"]'
 
 MANIFEST_NAME = '.safekeep-manifest.json'
 # 2 added the per-file lists on the git-derived groups, which is what lets a restore say that
-# the file it just wrote was gitignored rather than untracked. Reading is unaffected: a version
-# 1 manifest simply has no lists, and the files it restores go unlabelled.
+# the file it just wrote was gitignored rather than untracked.
 MANIFEST_VERSION = 2
 
 # What each kind of group contributes, in words rather than in the manifest's key names. A git

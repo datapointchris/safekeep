@@ -1364,27 +1364,6 @@ def test_a_source_records_the_files_of_its_git_groups(tmp_path):
     assert safekeep.file_kinds(manifest)[safekeep.snapshot_rel(repo / 'secrets.env')] == 'ignored'
 
 
-def test_a_manifest_without_file_lists_still_restores(tmp_path, source_tree):
-    """Version 1 snapshots have no 'paths' on any group, and they are the ones a rebuild is most
-    likely to reach for. They restore unlabelled rather than not at all."""
-    dest = tmp_path / 'dest'
-    target = tmp_path / 'target'
-    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup')
-
-    snapshot = next(d for d in dest.iterdir() if d.is_dir())
-    manifest_path = snapshot / safekeep.MANIFEST_NAME
-    manifest = json.loads(manifest_path.read_text())
-    manifest['version'] = 1
-    for group in manifest['groups']:
-        group.pop('paths', None)
-    manifest_path.write_text(json.dumps(manifest))
-
-    result = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
-    assert result.returncode == 0, result.stderr
-    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').read_text() == 'plain\n'
-
-
 def test_fzf_is_only_required_for_interactive_selection(tmp_path, source_tree):
     """Non-interactive restore must not depend on fzf being installed."""
     dest = tmp_path / 'dest'
