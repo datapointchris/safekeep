@@ -24,7 +24,7 @@ safekeep backup --tag wip   # Copy only the entries tagged 'wip'
 safekeep snapshots                        # What is at the destination
 safekeep tags                             # Which tags exist, and what each would restore
 safekeep tags wip                         # The sources one tag covers
-safekeep restore --to /tmp/restore-test   # Rehearse: pick a snapshot and groups
+safekeep restore --to /tmp/restore-test   # Rehearse: pick a snapshot and sources
 safekeep restore --to / --tag wip         # Restore everything tagged 'wip'
 ```
 
@@ -146,7 +146,11 @@ Path construction: `back_up_to / YYYY-MM-DD / absolute-path-from-root`
 
 `.safekeep-manifest.json` is written into each snapshot and is what makes it restorable on a machine that no longer has the config. It records the groups collected (kind, source, tags, counts, sizes), the source `home` for remapping, file modes, symlink origins, oversized files that were skipped, and any config warnings.
 
-**Modes** are recorded only where they deviate from `0644` for files and `0755` for directories. The destination is typically SMB or DrvFs and cannot store Unix modes, so the backup is written with `--no-perms` and every file arrives with the same mode. Restore applies the defaults everywhere and then the recorded deviations, which collapses the map to just the interesting entries — `0600` secrets and executable scripts. Without this, restored SSH and GPG config files come back group-readable and those tools refuse to use them.
+**A group is a (kind, source) pair, and it is not the unit anything is restored in.** A repo contributes a `git_untracked` group and a `git_ignored` group over one subtree, which restore rsyncs once — so the picker, the counters and the summary all speak in *sources*, and a repo is one row carrying `untracked + ignored`. The manifest keeps the two groups because their file sets are disjoint and each carries its own list; nothing above the manifest has a reason to.
+
+**The git groups record their file lists (`paths`); the path groups do not.** That is what lets a restore say the file it just wrote was gitignored rather than untracked, on a machine where the repo is not present to be asked. A path group's files are all the same kind, so a list there would repeat what its source line already said, at the cost of turning the manifest into a directory listing. Manifest version 2 added these; version 1 snapshots restore unlabelled.
+
+**Modes** are recorded only where they deviate from `0644` for files and `0755` for directories. The destination is typically SMB or DrvFs and cannot store Unix modes, so the backup is written with `--no-perms` and every file arrives with the same mode. Restore applies the recorded deviations, and the defaults only to paths it created, which collapses the map to just the interesting entries — `0600` secrets and executable scripts. Without this, restored SSH and GPG config files come back group-readable and those tools refuse to use them.
 
 **Symlinks** are dereferenced on backup (`rsync --copy-links`) so a snapshot holds real content rather than links that break when the source machine is lost. The manifest records that the source *was* a symlink and where it pointed, so restore can report which restored files should be links and offer `--skip-symlinked`.
 
@@ -157,10 +161,10 @@ A snapshot with no manifest cannot be restored by safekeep — it says so and po
 ```bash
 safekeep backup                     # everything the config lists
 safekeep backup --tag secrets       # only the entries carrying that tag
-safekeep backup --group ~/notes     # only the entries whose path contains that string
+safekeep backup --source ~/notes    # only the entries whose path contains that string
 ```
 
-**Bare `backup` means everything, so `--tag` and `--group` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
+**Bare `backup` means everything, so `--tag` and `--source` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
 
 A tag or path that matches nothing in the config is a usage error rather than a run that copies nothing, because a backup covering nothing reads exactly like one that covered everything it was asked to — the summary only reports what was copied.
 
@@ -178,32 +182,65 @@ safekeep tags --from DATE   # size against an older snapshot instead of the newe
 
 That disagreement is the whole reason the command exists. Without it, `restore --to / --tag wsl` reporting `nothing selected` looks like a bug in the tool rather than a snapshot taken before the tag was written.
 
-Sizes come from the snapshot being reported against — the newest restorable one unless `--from` names another — so a tag's row is what a restore would actually bring back rather than what the source paths hold now. Sources carrying no tag at all are counted at the bottom: those are reachable only with `--all` or `--group`, which is worth knowing before a rebuild rather than during one.
+Sizes come from the snapshot being reported against — the newest restorable one unless `--from` names another — so a tag's row is what a restore would actually bring back rather than what the source paths hold now. Sources carrying no tag at all are counted at the bottom: those are reachable only with `--all` or `--source`, which is worth knowing before a rebuild rather than during one.
 
 ## Restore
 
 ```bash
-safekeep restore --to PATH [--from DATE] [--all | --group PATH | --tag NAME]
+safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
                            [--dry-run] [--on-conflict POLICY] [--skip-symlinked]
 ```
 
 `--to` is required. `--to /` is a real restore; `--to /tmp/restore-test` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed.
 
-**Selection is always explicit.** With `--all`, `--group`, or `--tag`, restore runs non-interactively. With none of them on a terminal, fzf opens: first a snapshot picker previewing each manifest, then a multi-select group picker previewing each group's subtree. With none of them and no terminal, it exits non-zero listing the available groups rather than guessing.
+**A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
+
+**Selection is always explicit.** With `--all`, `--source`, or `--tag`, restore runs non-interactively. With none of them on a terminal, fzf opens: first a snapshot picker previewing each manifest, then a multi-select source picker previewing the files that source holds, labelled untracked or ignored. With none of them and no terminal, it exits non-zero listing the available sources rather than guessing.
+
+**The source picker is sorted by path**, not in manifest order. Manifest order is config order, which is meaningful to whoever wrote the config and to nobody scanning thirty rows for the one they came for.
 
 Both pickers pin their keys above the prompt — `tab` selects, `shift-tab` deselects, `ctrl-a` takes everything, `enter` restores. Multi-select is fzf's own binding rather than this tool's, so the picker is the only place it can be recalled at the moment it is needed.
 
-**A selection that matched nothing exits 1 and says why.** Cancelling out of the fzf picker is a restore you decided against, and exits 0; `--tag wsl` matching no group in the snapshot is a request that failed, and a caller has to be able to tell the two apart. The error names the tags that snapshot does carry, which is the fact that distinguishes a typo from a tag added to the config after the snapshot was taken.
+**A selection that matched nothing exits 1 and says why.** Cancelling out of the fzf picker is a restore you decided against, and exits 0; `--tag wsl` matching nothing in the snapshot is a request that failed, and a caller has to be able to tell the two apart. The error names the tags that snapshot does carry, which is the fact that distinguishes a typo from a tag added to the config after the snapshot was taken.
 
 Bare `safekeep restore` prints the restore help rather than an error — no args shows help, always. Naming a selection and forgetting `--to` is the other case: intent was stated, so that one is an error naming the single missing option.
 
-`--on-conflict` chooses what happens when a target file already exists: `backup` (default, renames the existing file with a `.pre-restore` suffix), `skip`, `overwrite`, or `newer`.
+### Conflicts
+
+`--on-conflict` chooses what happens when a target file already exists:
+
+| Policy | What it does |
+| --- | --- |
+| `backup` | Default. Restores, keeping the file it replaced as `<name>.pre-restore` |
+| `ask` | Names each existing file and waits — `[y]es [N]o [a]ll [k]eep all [q]uit`. Keeps no copies |
+| `skip` | Leaves every existing file alone |
+| `overwrite` | Restores over it with nothing kept |
+| `newer` | Restores only where the snapshot's copy is the newer one |
+
+**`ask` and `backup` are the two answers to the same question, and which is right depends on how many files are in it.** `backup` never asks and never loses anything, at the cost of a `.pre-restore` file beside everything it replaced — fine for a whole-machine restore, litter for a handful of files. `ask` costs one keystroke per conflicting file and leaves the tree clean, which is unusable at ten thousand files and exactly right at ten. Only conflicts are asked about; a file the target does not have is not a decision. `ask` off a terminal is a usage error rather than a hang, and `q` stops the run where it stands, leaving the sources already restored as they are.
 
 **`backup` and `overwrite` compare by checksum, not by size and timestamp.** rsync's quick check skips a file whose size and mtime match the source without ever reading it, which is right for a sync and wrong for a restore — a file corrupted in place keeps both its size and its timestamp, and that is exactly the file being restored over. Passing `--checksum` makes "the snapshot wins" true by content, and still skips genuinely identical files so no `.pre-restore` copy is manufactured for a file that never changed. `skip` and `newer` keep the metadata comparison, because not touching existing files is what they are for.
 
-**A restore reports as it goes, because that checksum comparison makes it slow enough to look hung.** Each source prints its position, its path, and the size the manifest recorded for it *before* rsync is called on it, so a wait always belongs to a group that has already been named. On a terminal rsync adds a live line beneath it — `--info=progress2` where the rsync supports it, `--progress` on the openrsync that macOS ships as `/usr/bin/rsync` — and the mode-reapplication pass prints a counter of its own, that being one `chmod` syscall per restored path and minutes of them over SMB. Redirected output gets the per-group lines and none of the redrawn ones: a carriage return collapses a captured log into a single unreadable line, and a restore is exactly the thing run under `tee`.
+### What a restore prints
 
-A `--dry-run` restore into a target that does not exist yet reports what it would create without calling rsync for those groups. rsync will not accept a file destination whose parent directory is missing, and a dry run is not allowed to create one — so for a rehearsal into a fresh directory there is no question left to ask it, since everything under the group would be created.
+Each source prints its position, path, size and kinds *before* rsync is called on it, so a wait always belongs to a source that has already been named. Beneath it, **every file is named as rsync writes it**:
+
+```text
+  [2/3] ~/code/project        14 files      82 KB  untracked + ignored
+      + .planning/status.md   ignored
+      ~ scratch.py            untracked   kept .pre-restore copy
+      2 files restored · 1 replaced · 11 unchanged
+```
+
+`+` is a file the target did not have, `~` one that was already there. Whether it existed is read before rsync runs, which is the only chance to read it — afterwards every path is present and nothing distinguishes the two. The kind comes from the manifest's per-group file lists, so it is only ever shown for a repo's files, where it is the thing worth knowing.
+
+The list is what rsync actually wrote, so files it skipped as identical are counted rather than named. That is also why there is no progress bar: the file lines are the progress signal, and interleaving `--info=progress2`'s redraws with them produced neither. `--out-format=%n` gets the exact list from rsync 3.x, `-v` gets it from the openrsync macOS ships as `/usr/bin/rsync`, and `--outbuf=L` keeps it streaming rather than arriving in 4 KB bursts.
+
+The mode pass prints a counter of its own, that being one `chmod` syscall per restored path and minutes of them over SMB. Redirected output gets every line above and none of the redrawn ones: a carriage return collapses a captured log into a single unreadable line, and a restore is exactly the thing run under `tee`.
+
+**The mode pass touches only what the snapshot holds.** It walks the snapshot's own subtree rather than the target's, applying each recorded deviation and applying the defaults only to paths this restore created. It used to walk the target, which for a repo is the entire working tree — so restoring two untracked files reported eleven thousand paths, and every tracked file got `0644` because the manifest had no mode for a file it had never seen. An executable that a `git clone` had just put back came out non-executable.
+
+A `--dry-run` restore into a target that does not exist yet lists what it would create without calling rsync. rsync will not accept a file destination whose parent directory is missing, and a dry run is not allowed to create one — so for a rehearsal into a fresh directory there is no question left to ask it, since everything under the source would be created.
 
 If the snapshot's home differs from the restoring machine's, paths under it are remapped automatically — a snapshot taken as `/home/chris` restores into whatever `$HOME` is now.
 

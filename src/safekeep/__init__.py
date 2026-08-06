@@ -96,7 +96,17 @@ CONFIG_DIR = Path.home() / '.config' / 'safekeep'
 SINGLE_TAG_EXAMPLE = 'tags = ["wsl"]'
 
 MANIFEST_NAME = '.safekeep-manifest.json'
-MANIFEST_VERSION = 1
+# 2 added the per-file lists on the git-derived groups, which is what lets a restore say that
+# the file it just wrote was gitignored rather than untracked. Reading is unaffected: a version
+# 1 manifest simply has no lists, and the files it restores go unlabelled.
+MANIFEST_VERSION = 2
+
+# What each kind of group contributes, in words rather than in the manifest's key names. A git
+# repo's line otherwise reads as though the repo itself is being restored -- which is the one
+# thing a snapshot never holds, since a clone puts everything else back.
+KIND_LABELS = {'path': 'path', 'git_untracked': 'untracked', 'git_ignored': 'ignored'}
+
+PRE_RESTORE_SUFFIX = '.pre-restore'
 
 
 def tool_version() -> str:
@@ -144,7 +154,7 @@ skip_names_matching = [".venv", "node_modules", "*.pyc", "*.iso"]
 skip_files_over_mb = 50
 
 # One [[back_up_paths]] block per path, each copied whole. Tags are free-form
-# labels: `safekeep restore --tag secrets` restores just those groups, so tag by
+# labels: `safekeep restore --tag secrets` restores just those sources, so tag by
 # the scenario you would restore in, not by what the files are.
 
 [[back_up_paths]]
@@ -590,37 +600,95 @@ def rsync_untracked(files, dest_base, dry_run=False):
 
 
 @cache
-def rsync_progress_flag():
-    """The flag that makes rsync report as it works, or None where it would only make a mess.
+def rsync_help():
+    """This rsync's own option list, which is the only reliable thing to ask it about.
 
-    --info=progress2 is one self-overwriting line covering the whole transfer; --progress is a
-    block per file, which on a real restore is thousands of lines of scroll. rsync grew --info
-    in 3.1, and a restore does not get to assume the good rsync: macOS ships openrsync as
-    /usr/bin/rsync, and a disaster recovery is precisely the moment the Homebrew rsync this repo
-    declares has not been installed yet. Both flags redraw their own line, so a non-terminal gets
-    neither and reads the per-group lines instead.
+    A restore does not get to assume the good rsync: macOS ships openrsync as /usr/bin/rsync,
+    and a disaster recovery is precisely the moment the Homebrew rsync this repo declares has
+    not been installed yet. Both print their options, so both can be asked.
     """
-    if not sys.stdout.isatty():
+    probe = subprocess.run(['rsync', '--help'], capture_output=True, text=True)
+    return probe.stdout + probe.stderr
+
+
+def rsync_supports(option):
+    return option in rsync_help()
+
+
+# Only the -v fallback needs these: --out-format prints the paths and nothing else, while -v
+# wraps them in a preamble and a transfer summary. A sentinel prefix would be the exact answer
+# and is not available -- rsync escapes any non-printable byte in its own output, mark included.
+RSYNC_NOISE = (
+    'sending incremental file list',
+    'receiving incremental file list',
+    'building file list',
+    'sent ',
+    'received ',
+    'total size',
+    'created directory',
+    'done',
+)
+
+
+def rsync_naming_flags():
+    """The flags that make rsync name each path it writes, and stream them a line at a time.
+
+    --out-format is the exact answer and is what rsync 3.x gets; -v is the same list buried in
+    summary lines, and is all openrsync offers. Without --outbuf the output is block-buffered
+    into a pipe, and a restore that reports in 4 KB bursts is no better than one that says
+    nothing until it finishes.
+    """
+    flags = []
+    if rsync_supports('--out-format'):
+        flags.append('--out-format=%n')
+    else:
+        flags.append('-v')
+    if rsync_supports('--outbuf'):
+        flags.append('--outbuf=L')
+    return flags
+
+
+def rsync_named_file(line):
+    """The path rsync just wrote, from one line of its output, or None if the line is not one.
+
+    Directories are dropped: rsync names them with a trailing slash, and a restore reports the
+    files it put back rather than the tree it had to create to hold them.
+    """
+    if not rsync_supports('--out-format') and line.startswith(RSYNC_NOISE):
         return None
-    probe = subprocess.run(['rsync', '--info=help'], capture_output=True)
-    return '--info=progress2' if probe.returncode == 0 else '--progress'
+    if not line or line == './' or line.endswith('/'):
+        return None
+    return line
 
 
-def run_rsync(cmd):
-    """Run rsync, tolerating the partial-transfer exit codes.
+def check_rsync(cmd, returncode):
+    """Tolerate the partial-transfer exit codes; exit on anything else.
 
     Any other failure exits rather than raising: a traceback names the Python frame that called
     rsync, which is never the thing that went wrong, and it buries the command. Re-running that
     command by hand is how an rsync failure gets diagnosed, so it is what the error prints.
     """
-    result = subprocess.run(cmd)
-    if result.returncode in (23, 24):
+    if returncode in (23, 24):
         print(f'  {yellow("warning:")} rsync completed with partial transfer (some files skipped)')
         return
-    if result.returncode != 0:
-        print(f'{red("safekeep:")} rsync exited {yellow(str(result.returncode))}', file=sys.stderr)
+    if returncode != 0:
+        print(f'{red("safekeep:")} rsync exited {yellow(str(returncode))}', file=sys.stderr)
         print(f'  {shlex.join(cmd)}', file=sys.stderr)
         sys.exit(1)
+
+
+def run_rsync(cmd):
+    check_rsync(cmd, subprocess.run(cmd).returncode)
+
+
+def run_rsync_naming_files(cmd, report):
+    """Run rsync, handing `report` each path as rsync writes it."""
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+    for line in process.stdout:
+        name = rsync_named_file(line.rstrip('\n'))
+        if name is not None:
+            report(name)
+    check_rsync(cmd, process.wait())
 
 
 def read_manifest(snapshot_dir):
@@ -647,6 +715,45 @@ def group_id(group):
     return f'{group["kind"]}:{group["source"]}'
 
 
+def kinds_label(kinds):
+    return ' + '.join(KIND_LABELS.get(kind, kind) for kind in kinds)
+
+
+def source_rows(groups):
+    """One row per source, sorted by path — the unit a restore actually works in.
+
+    A repo contributes an untracked group and an ignored group over one subtree, so restoring
+    per group would rsync it twice; they are disjoint file sets, so their counts sum. Offering
+    the two separately was a lie besides, since selecting either restored both.
+
+    Sorted by path because that is the order the eye can scan a picker of thirty sources in —
+    manifest order is config order, which is only meaningful to whoever wrote the config.
+    """
+    rows = {}
+    for group in groups:
+        row = rows.setdefault(group['source'], {'source': group['source'], 'kinds': [], 'tags': [], 'files': 0, 'bytes': 0})
+        if group['kind'] not in row['kinds']:
+            row['kinds'].append(group['kind'])
+        row['tags'] += [tag for tag in group.get('tags', []) if tag not in row['tags']]
+        row['files'] += group.get('files', 0)
+        row['bytes'] += group.get('bytes', 0)
+    return sorted(rows.values(), key=lambda row: row['source'])
+
+
+def file_kinds(manifest):
+    """{snapshot-relative path: label} for the files whose group recorded a list of them.
+
+    Only the git-derived groups record one. A path group's files are all the same kind, so a
+    list would say nothing a source line has not already said — and listing whole directory
+    trees would leave the manifest mostly filenames.
+    """
+    kinds = {}
+    for group in manifest.get('groups', []):
+        for rel in group.get('paths', []):
+            kinds[rel] = KIND_LABELS.get(group['kind'], group['kind'])
+    return kinds
+
+
 def show_snapshots(dest):
     snapshots = list_snapshots(dest)
     if not snapshots:
@@ -663,7 +770,8 @@ def show_snapshots(dest):
         total_bytes = sum(g.get('bytes', 0) for g in groups)
         total_files = sum(g.get('files', 0) for g in groups)
         host = manifest.get('hostname', '?')
-        print(f'  {bold(snapshot_dir.name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {len(groups):>2} groups  {cyan(host)}')
+        sources = len(source_rows(groups))
+        print(f'  {bold(snapshot_dir.name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}')
 
 
 def preview_snapshot(dest, date):
@@ -675,10 +783,10 @@ def preview_snapshot(dest, date):
     print(f'{date}   {manifest.get("hostname", "?")}   {manifest.get("created", "?")}')
     print(f'config: {manifest.get("config_name", "?")}   home: {manifest.get("home", "?")}')
     print()
-    for group in manifest.get('groups', []):
-        tags = ' '.join(group.get('tags', []))
-        print(f'  {group["kind"]:<14} {group["source"]}')
-        print(f'  {"":<14} {plural(group.get("files", 0), "file")}, {human_size(group.get("bytes", 0))}  {tags}')
+    for row in source_rows(manifest.get('groups', [])):
+        tags = ' '.join(row['tags'])
+        print(f'  {kinds_label(row["kinds"]):<14} {row["source"]}')
+        print(f'  {"":<14} {plural(row["files"], "file")}, {human_size(row["bytes"])}  {tags}')
     skipped = manifest.get('skipped_large', [])
     if skipped:
         print()
@@ -829,7 +937,7 @@ def show_tags(config, config_path, args):
 
     untagged = [path for _, path, tags in config_entries(config) if not tags]
     if untagged:
-        print(f'\n  untagged: {plural(len(untagged), "source")} — only {cyan("--all")} or {cyan("--group")} reaches them')
+        print(f'\n  untagged: {plural(len(untagged), "source")} — only {cyan("--all")} or {cyan("--source")} reaches them')
     print(f'\n  {cyan(f"safekeep tags {sorted(index)[0]}")}  what one tag covers')
 
 
@@ -867,7 +975,7 @@ def require_fzf():
     if shutil.which('fzf'):
         return
     print(f'{red("safekeep:")} fzf is required for interactive selection', file=sys.stderr)
-    print(f'  select non-interactively instead: {cyan("--all")}, {cyan("--group PATH")}, or {cyan("--tag NAME")}', file=sys.stderr)
+    print(f'  select non-interactively instead: {cyan("--all")}, {cyan("--source PATH")}, or {cyan("--tag NAME")}', file=sys.stderr)
     sys.exit(1)
 
 
@@ -895,7 +1003,7 @@ def pick_snapshot(dest, config_name):
     for snapshot_dir, manifest in snapshots:
         groups = manifest.get('groups', [])
         total_bytes = sum(g.get('bytes', 0) for g in groups)
-        lines.append(f'{snapshot_dir.name}\t{human_size(total_bytes)}\t{plural(len(groups), "group")}')
+        lines.append(f'{snapshot_dir.name}\t{human_size(total_bytes)}\t{plural(len(source_rows(groups)), "source")}')
 
     selected = fzf(
         lines,
@@ -914,37 +1022,73 @@ def pick_snapshot(dest, config_name):
     return selected[0].split('\t')[0]
 
 
-def pick_groups(snapshot_dir, manifest):
-    """Interactively choose groups, previewing each one's subtree in the snapshot."""
-    groups = manifest.get('groups', [])
-    if not groups:
+def pick_sources(snapshot_dir, manifest, config_name):
+    """Interactively choose sources, previewing the files the snapshot holds for each."""
+    rows = source_rows(manifest.get('groups', []))
+    if not rows:
         return []
 
-    lines = []
-    for group in groups:
-        tags = ','.join(group.get('tags', [])) or '-'
-        lines.append(
-            f'{group["kind"]}\t{group["source"]}\t{plural(group.get("files", 0), "file")}\t{human_size(group.get("bytes", 0))}\t{tags}'
-        )
+    # One preformatted column block, with the raw source hidden in a second field: a padded
+    # column cannot double as a path, and fzf's own tab rendering will not align these.
+    width = max(len(row['source']) for row in rows)
+    kind_width = max(len(kinds_label(row['kinds'])) for row in rows)
+    lines = [
+        f'{row["source"]:<{width}}  {kinds_label(row["kinds"]):<{kind_width}}  '
+        f'{size_cell(row["files"], row["bytes"])}  {",".join(row["tags"])}'.rstrip()
+        + f'\t{row["source"]}'
+        for row in rows
+    ]
 
+    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} preview-source {snapshot_dir.name} {{2}}'
     selected = fzf(
         lines,
         [
             '--multi',
             '--delimiter=\t',
-            '--with-nth=1,2,3,4,5',
+            '--with-nth=1',
             # Named in full and pinned above the prompt: the multi-select keys are fzf's own, so
             # the one place they can be recalled is the picker itself.
             '--header=tab select · shift-tab deselect · enter restore · esc cancel',
             '--header-first',
             '--preview',
-            f'ls -la {snapshot_dir}{{2}} 2>/dev/null | head -60',
+            preview_cmd,
             '--preview-window=right:60%',
         ],
     )
 
-    chosen = {(line.split('\t')[0], line.split('\t')[1]) for line in selected}
-    return [g for g in groups if (g['kind'], g['source']) in chosen]
+    chosen = {line.split('\t')[1] for line in selected if '\t' in line}
+    return [row for row in rows if row['source'] in chosen]
+
+
+PREVIEW_FILE_LIMIT = 200
+
+
+def preview_source(dest, date, source):
+    """Render the files a snapshot holds for one source, for the fzf preview pane."""
+    snapshot_dir = dest / date
+    manifest = read_manifest(snapshot_dir)
+    if manifest is None:
+        print('no manifest — not restorable by safekeep')
+        return
+
+    row = next((row for row in source_rows(manifest.get('groups', [])) if row['source'] == source), None)
+    if row is None:
+        print(f'{source} is not in {date}')
+        return
+
+    kinds = file_kinds(manifest)
+    print(f'{kinds_label(row["kinds"])}   {plural(row["files"], "file")}   {human_size(row["bytes"])}')
+    if row['tags']:
+        print(f'tags: {", ".join(row["tags"])}')
+    print()
+
+    files = [origin for origin, is_dir in stored_paths(snapshot_dir, source) if not is_dir]
+    for origin in files[:PREVIEW_FILE_LIMIT]:
+        label = kinds.get(snapshot_rel(origin), '')
+        relative = origin.name if str(origin) == source else os.path.relpath(str(origin), source)
+        print(f'  {relative}{f"   {label}" if label else ""}')
+    if len(files) > PREVIEW_FILE_LIMIT:
+        print(f'  ... and {len(files) - PREVIEW_FILE_LIMIT} more')
 
 
 def select_groups(manifest, args):
@@ -953,14 +1097,14 @@ def select_groups(manifest, args):
     if args.all:
         return groups
 
-    if not args.group and not args.tag:
+    if not args.source and not args.tag:
         return None
 
     selected = []
     for group in groups:
-        matched_group = any(needle in group['source'] for needle in args.group)
+        matched_source = any(needle in group['source'] for needle in args.source)
         matched_tag = any(tag in group.get('tags', []) for tag in args.tag)
-        if matched_group or matched_tag:
+        if matched_source or matched_tag:
             selected.append(group)
     return selected
 
@@ -987,110 +1131,268 @@ def paths_under_any(sources, candidates):
     return sorted({p for source in sources for p in paths_under(source, candidates)})
 
 
-def restore_group(snapshot_dir, source, target_root, manifest_home, target_home, on_conflict, skip_symlinked, symlinks, dry_run):
-    """Rsync one group's subtree out of the snapshot and into target_root."""
+class RestoreAborted(Exception):
+    """Answering quit at an --on-conflict ask prompt, which stops the run where it stands."""
+
+
+def stored_paths(snapshot_dir, source):
+    """Every path the snapshot holds for one source, as the absolute paths it had when backed up.
+
+    Parents come before children, and the source itself is the first entry.
+
+    This list is what the restore reports, compares against the target, and reapplies modes to.
+    The target's own tree can answer none of those: a repo whose untracked files are being
+    restored has a whole working tree beside them that no snapshot ever recorded, and walking
+    that is how a restore of two hundred files came to chmod eleven thousand paths.
+    """
+    stored = snapshot_dir / snapshot_rel(source)
+    if stored.is_file():
+        return [(Path(source), False)]
+
+    found = [(Path(source), True)]
+    for dirpath, dirnames, filenames in os.walk(stored):
+        relative = os.path.relpath(dirpath, stored)
+        base = Path(source) if relative == '.' else Path(source) / relative
+        found.extend((base / name, True) for name in sorted(dirnames))
+        found.extend((base / name, False) for name in sorted(filenames))
+    return found
+
+
+def target_entries(snapshot_dir, source, target_root, manifest_home, target_home, skip):
+    """Each path the snapshot holds for a source: its name, where it lands, whether it is there.
+
+    'name' is the path relative to the source, which is both what rsync reports a transfer under
+    and the shortest thing that still identifies a file beneath a line that named the source.
+
+    'existed' is read before rsync runs and is the only chance to read it: afterwards every path
+    is present and nothing distinguishes the file that was overwritten from the one that was
+    created.
+    """
+    from_a_file = (snapshot_dir / snapshot_rel(source)).is_file()
+    entries = []
+    for origin, is_dir in stored_paths(snapshot_dir, source):
+        if str(origin) in skip:
+            continue
+        target = Path(target_root) / snapshot_rel(remap_home(str(origin), manifest_home, target_home))
+        name = origin.name if from_a_file else os.path.relpath(str(origin), source)
+        entries.append({'name': name, 'origin': origin, 'is_dir': is_dir, 'target': target, 'existed': target.exists()})
+    return entries
+
+
+def read_answer(prompt, valid, default):
+    """Read one keystroke's worth of answer, re-asking until it is one of the offered ones."""
+    while True:
+        try:
+            answer = input(prompt).strip().lower()[:1]
+        except EOFError as error:
+            raise RestoreAborted from error
+        if not answer:
+            return default
+        if answer in valid:
+            return answer
+
+
+def ask_about_conflicts(conflicts, decision):
+    """Ask about each file already at the target, returning the origins to leave alone.
+
+    Only conflicts are asked about: a file the target does not have is not a decision, and a
+    restore that asked about every file would be unanswerable at the size it is run at. The
+    answer to keep is the default, because the prompt is answered fastest by whoever is least
+    sure, and 'keep' is the one that cannot lose anything.
+    """
+    declined = set()
+    for entry in conflicts:
+        if decision['all'] is None:
+            answer = read_answer(
+                f'      {yellow("~")} {entry["name"]} exists — overwrite? [y]es [N]o [a]ll [k]eep all [q]uit: ', 'ynakq', 'n'
+            )
+            if answer == 'q':
+                raise RestoreAborted
+            if answer == 'a':
+                decision['all'] = True
+            elif answer == 'k':
+                decision['all'] = False
+            elif answer == 'n':
+                declined.add(str(entry['origin']))
+                continue
+            else:
+                continue
+        if not decision['all']:
+            declined.add(str(entry['origin']))
+    return declined
+
+
+def restore_file_line(name, entry, kind, on_conflict):
+    """One restored file, said in terms of what it did to the target."""
+    label = f'  {cyan(kind)}' if kind else ''
+    if entry is None or not entry['existed']:
+        return f'{green("+")} {name}{label}'
+    kept = f'  {yellow(f"kept {PRE_RESTORE_SUFFIX} copy")}' if on_conflict == 'backup' else ''
+    return f'{yellow("~")} {name}{label}{kept}'
+
+
+def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, symlinks, kinds, args, decision):
+    """Rsync one source's subtree out of the snapshot, naming each file as rsync writes it.
+
+    Returns the per-path records the mode pass needs, or None when the source was skipped.
+    """
+    source = row['source']
     stored = snapshot_dir / snapshot_rel(source)
     if not stored.exists():
-        print(f'    {yellow("skip: not present in snapshot")}')
-        return False
+        print(f'      {yellow("skip: not present in snapshot")}')
+        return None
 
     symlinked = paths_under(source, ['/' + rel for rel in symlinks])
-    if skip_symlinked and str(source) in symlinked:
-        print(f'    {yellow("skip: was a symlink")}')
-        return False
+    if args.skip_symlinked and str(source) in symlinked:
+        print(f'      {yellow("skip: was a symlink")}')
+        return None
+
+    entries = target_entries(
+        snapshot_dir, source, target_root, manifest_home, target_home, set(symlinked) if args.skip_symlinked else set()
+    )
+    conflicts = [entry for entry in entries if not entry['is_dir'] and entry['existed']]
+
+    declined = ask_about_conflicts(conflicts, decision) if args.on_conflict == 'ask' and conflicts else set()
+    entries = [entry for entry in entries if str(entry['origin']) not in declined]
+    files = [entry for entry in entries if not entry['is_dir']]
+    if not files:
+        print(f'      {yellow("kept every file")} — {plural(len(declined), "file")} declined')
+        return entries
 
     target = Path(target_root) / snapshot_rel(remap_home(source, manifest_home, target_home))
+    by_name = {entry['name']: entry for entry in files}
+    transferred = []
+
+    def report(name):
+        entry = by_name.get(name)
+        transferred.append(entry)
+        kind = kinds.get(snapshot_rel(entry['origin'])) if entry else ''
+        print(f'      {restore_file_line(name, entry, kind, args.on_conflict)}')
 
     cmd = ['rsync', '-a']
-    if on_conflict == 'skip':
+    if args.on_conflict == 'skip':
         cmd.append('--ignore-existing')
-    elif on_conflict == 'newer':
+    elif args.on_conflict == 'newer':
         cmd.append('--update')
     else:
-        # backup and overwrite both mean the snapshot wins, so the quick check has to go.
-        # rsync skips a file with the same size and mtime without ever reading it, which is
-        # right for a sync and wrong for a restore: a file corrupted in place keeps both its
-        # size and its timestamp, and that is precisely the file being restored over. Checksum
-        # rather than --ignore-times, so genuinely identical files are still skipped and no
-        # .pre-restore copy is manufactured for a file that never changed.
+        # backup, overwrite and an answered ask all mean the snapshot wins, so the quick check
+        # has to go. rsync skips a file with the same size and mtime without ever reading it,
+        # which is right for a sync and wrong for a restore: a file corrupted in place keeps
+        # both its size and its timestamp, and that is precisely the file being restored over.
+        # Checksum rather than --ignore-times, so genuinely identical files are still skipped
+        # and no .pre-restore copy is manufactured for a file that never changed.
         cmd.append('--checksum')
-        if on_conflict == 'backup':
-            cmd.extend(['--backup', '--suffix=.pre-restore'])
+        if args.on_conflict == 'backup':
+            cmd.extend(['--backup', f'--suffix={PRE_RESTORE_SUFFIX}'])
 
-    if skip_symlinked and stored.is_dir():
+    if args.skip_symlinked and stored.is_dir():
         for abs_path in symlinked:
             cmd.extend(['--exclude', '/' + os.path.relpath(abs_path, str(source))])
 
-    if dry_run:
+    if args.dry_run:
         cmd.append('-n')
+    cmd.extend(rsync_naming_flags())
 
-    progress = rsync_progress_flag()
-    if progress and not dry_run:
-        cmd.append(progress)
+    listing = None
+    if declined and stored.is_dir():
+        # An exclude is a glob, and a filename holding a bracket or an asterisk would be matched
+        # as a pattern rather than as itself. --files-from names the survivors literally.
+        listing = write_path_list(sorted(by_name))
+        cmd.extend(['--files-from', listing])
 
     if stored.is_dir():
-        cmd.append(str(stored) + '/')
-        cmd.append(str(target) + '/')
+        cmd.extend([str(stored) + '/', str(target) + '/'])
     else:
-        cmd.append(str(stored))
-        cmd.append(str(target))
+        cmd.extend([str(stored), str(target)])
 
-    if not dry_run:
+    if not args.dry_run:
         target.parent.mkdir(parents=True, exist_ok=True)
     elif not target.parent.exists():
         # A rehearsal into a fresh directory, which is the documented way to use --dry-run. The
         # parent cannot be created here without writing, and rsync will not accept a file
         # destination whose directory is missing -- it exits 3 rather than reporting a transfer.
-        # Nothing exists to conflict with, so every file under the group would be created and
-        # there is no question left for rsync to answer.
-        return True
+        # Nothing exists to conflict with, so every file under the source would be created and
+        # rsync has no question left to answer that this list does not.
+        for name in sorted(by_name):
+            report(name)
+        report_source_totals(transferred, files, declined)
+        return entries
 
-    run_rsync(cmd)
-    return True
+    try:
+        run_rsync_naming_files(cmd, report)
+    finally:
+        if listing:
+            os.unlink(listing)
+
+    report_source_totals(transferred, files, declined)
+    return entries
 
 
-def apply_modes(manifest, sources, target_root, dry_run):
-    """Reapply source file modes lost to the destination filesystem.
+def write_path_list(names):
+    """Write a newline-delimited path list for rsync --files-from, returning its path."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
+        tmp.write('\n'.join(names) + '\n')
+        return tmp.name
 
-    Walks each restored subtree applying the recorded defaults, then overrides with the
-    manifest's deviations. Without this every restored file carries whatever mode the
-    SMB round-trip gave it, and ssh and gpg refuse to use their own config files.
+
+def report_source_totals(transferred, files, declined):
+    """What the source's rsync did, in the four outcomes a file can have.
+
+    Unchanged is the one worth printing even when it is everything: a restore that names no
+    files is otherwise indistinguishable from one that failed to find any.
     """
-    manifest_home = manifest.get('home')
-    target_home = str(Path.home())
+    written = [entry for entry in transferred if entry is not None]
+    created = sum(1 for entry in written if not entry['existed'])
+    parts = []
+    if created:
+        parts.append(green(plural(created, 'file') + ' restored'))
+    if len(written) - created:
+        parts.append(yellow(f'{len(written) - created} replaced'))
+    if declined:
+        parts.append(f'{len(declined)} kept')
+    if len(files) - len(written):
+        parts.append(f'{len(files) - len(written)} unchanged')
+    print(f'      {" · ".join(parts)}')
+
+
+def apply_modes(manifest, entries, dry_run):
+    """Reapply the source modes the destination filesystem could not store.
+
+    The recorded deviation is applied wherever the manifest has one; the default is applied
+    only to paths this restore created. A path that was already at the target and has no
+    recorded mode is left alone — nothing about it was ever in the snapshot, so the default
+    would be a guess, and the guess strips the executable bit off files the restore never
+    touched. That is what chmodded a whole git working tree when this walked the target.
+
+    Files before directories, deepest first, so a directory restored to 0500 cannot lock the
+    pass out of the paths beneath it.
+    """
     modes = manifest.get('modes', {})
+    ordered = sorted(entries, key=lambda entry: (entry['is_dir'], -len(entry['origin'].parts)))
     changed = 0
+    recorded = 0
 
-    if dry_run:
-        # Nothing has been written, so there is no tree to walk. Report the recorded
-        # deviations that would be reapplied rather than a count of zero.
-        return len(paths_under_any(sources, ['/' + rel for rel in modes]))
-
-    for source in sources:
-        target = Path(target_root) / snapshot_rel(remap_home(source, manifest_home, target_home))
-        if not target.exists():
+    for entry in ordered:
+        wanted = modes.get(snapshot_rel(entry['origin']))
+        if wanted is None and entry['existed']:
             continue
-
-        status(f'scanning {tilde(source)}')
-        # Modes are keyed by the path as it existed on the backup machine, so each
-        # restored path is walked back through the target root and the home remap.
-        paths = [target] if target.is_file() else [target, *target.rglob('*')]
-        for path in paths:
-            origin = Path(source) if path == target else Path(source) / path.relative_to(target)
-            recorded = modes.get(snapshot_rel(origin))
-            wanted = int(recorded, 8) if recorded else (DEFAULT_DIR_MODE if path.is_dir() else DEFAULT_FILE_MODE)
-            try:
-                path.chmod(wanted)
-            except OSError:
-                continue
+        if wanted is not None:
+            recorded += 1
+        if dry_run:
             changed += 1
-            # One syscall per path, and over SMB that is minutes of silence on a large group.
-            # The interval is a redraw budget rather than a reporting granularity.
-            if changed % 200 == 0:
-                status(f'reapplying modes … {plural(changed, "path")}')
+            continue
+        try:
+            entry['target'].chmod(int(wanted, 8) if wanted else (DEFAULT_DIR_MODE if entry['is_dir'] else DEFAULT_FILE_MODE))
+        except OSError:
+            continue
+        changed += 1
+        # One syscall per path, and over SMB that is minutes of silence on a large source.
+        # The interval is a redraw budget rather than a reporting granularity.
+        if changed % 200 == 0:
+            status(f'reapplying modes … {plural(changed, "path")}')
 
     clear_status()
-    return changed
+    return changed, recorded
 
 
 def explain_empty_selection(manifest, date, args):
@@ -1104,38 +1406,29 @@ def explain_empty_selection(manifest, date, args):
     groups = manifest.get('groups', [])
     if args.tag:
         available = sorted({tag for group in groups for tag in group.get('tags', [])})
-        print(f'  no group in {cyan(date)} carries {yellow(", ".join(args.tag))}', file=sys.stderr)
+        print(f'  no source in {cyan(date)} carries {yellow(", ".join(args.tag))}', file=sys.stderr)
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
         print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags")} compares the two', file=sys.stderr)
-    if args.group:
-        print(f'  no source in {cyan(date)} contains {yellow(", ".join(args.group))}:', file=sys.stderr)
-        for group in groups:
-            print(f'    {tilde(group["source"])}', file=sys.stderr)
+    if args.source:
+        print(f'  no source in {cyan(date)} contains {yellow(", ".join(args.source))}:', file=sys.stderr)
+        for row in source_rows(groups):
+            print(f'    {tilde(row["source"])}', file=sys.stderr)
     if args.all and not groups:
-        print(f'  {cyan(date)} records no groups at all', file=sys.stderr)
-
-
-def source_totals(groups):
-    """Each source once, in selection order, with the files and bytes its groups sum to.
-
-    git_untracked and git_ignored groups share a repo subtree, so restoring per group would
-    rsync the same directory twice; they are also disjoint file sets, so summing them gives
-    the size the one rsync will actually move.
-    """
-    totals = {}
-    for group in groups:
-        entry = totals.setdefault(group['source'], {'files': 0, 'bytes': 0})
-        entry['files'] += group.get('files', 0)
-        entry['bytes'] += group.get('bytes', 0)
-    return totals
+        print(f'  {cyan(date)} records nothing at all', file=sys.stderr)
 
 
 def do_restore(config, config_path, args):
     dest = Path(config['back_up_to']).expanduser()
 
+    if args.on_conflict == 'ask' and not sys.stdin.isatty():
+        print(f'{red("safekeep:")} {cyan("--on-conflict ask")} has to be answered, and nothing is attached to ask', file=sys.stderr)
+        policies = ', '.join(cyan(policy) for policy in ('backup', 'skip', 'overwrite', 'newer'))
+        print(f'  decide up front instead: {policies} — {cyan("backup")} is the default', file=sys.stderr)
+        sys.exit(2)
+
     if args.from_date:
         date = args.from_date
-    elif sys.stdin.isatty() and not (args.all or args.group or args.tag):
+    elif sys.stdin.isatty() and not (args.all or args.source or args.tag):
         require_fzf()
         date = pick_snapshot(dest, config_path.stem)
         if date is None:
@@ -1162,56 +1455,66 @@ def do_restore(config, config_path, args):
     groups = select_groups(manifest, args)
     if groups is None:
         if not sys.stdin.isatty():
-            print(f'{red("safekeep:")} no groups selected — pass {cyan("--all")}, {cyan("--group")}, or {cyan("--tag")}', file=sys.stderr)
-            for group in manifest.get('groups', []):
-                print(f'  {group["kind"]:<14} {group["source"]}', file=sys.stderr)
+            print(f'{red("safekeep:")} nothing selected — pass {cyan("--all")}, {cyan("--source")}, or {cyan("--tag")}', file=sys.stderr)
+            for row in source_rows(manifest.get('groups', [])):
+                print(f'  {kinds_label(row["kinds"]):<20} {row["source"]}', file=sys.stderr)
             sys.exit(1)
         require_fzf()
-        groups = pick_groups(snapshot_dir, manifest)
+        rows = pick_sources(snapshot_dir, manifest, config_path.stem)
+    else:
+        rows = source_rows(groups)
 
-    if not groups:
+    if not rows:
         # An explicit selection that matched nothing is a failed request, not a cancelled one:
         # exit non-zero so a caller cannot read it as a restore that happened to be empty.
-        if args.all or args.group or args.tag:
+        if args.all or args.source or args.tag:
             print(f'{red("safekeep:")} nothing selected, nothing restored', file=sys.stderr)
             explain_empty_selection(manifest, date, args)
             sys.exit(1)
         print(f'{yellow("safekeep:")} nothing selected, nothing restored')
         return
 
-    totals = source_totals(groups)
     manifest_home = manifest.get('home')
     target_home = str(Path.home())
     symlinks = manifest.get('symlinks', {})
+    kinds = file_kinds(manifest)
 
     label = yellow('would restore') if args.dry_run else green('restoring')
-    print(f'{bold("safekeep:")} {label} {bold(plural(len(groups), "group"))} from {cyan(date)} to {cyan(args.to)}')
+    print(f'{bold("safekeep:")} {label} {bold(plural(len(rows), "source"))} from {cyan(date)} to {cyan(args.to)}')
     if manifest_home and manifest_home != target_home:
         print(f'  remapping {cyan(manifest_home)} -> {cyan(target_home)}')
-    if args.on_conflict in ('backup', 'overwrite') and not args.dry_run:
+    if args.on_conflict in ('backup', 'overwrite', 'ask') and not args.dry_run:
         # Named because it is the whole reason a restore takes as long as it does, and an
         # unexplained wait reads as a hang. The other two modes skip on mtime and are quick.
         print(f'  comparing by {cyan("checksum")}, which reads every file on both sides')
     print()
 
     restored = []
-    width = max(len(tilde(source)) for source in totals)
-    for position, source in enumerate(totals, start=1):
-        # Printed before the work rather than after it: this line is what says which group
-        # the wait belongs to, and after the fact it says nothing that was not already known.
-        counter = cyan(f'[{position}/{len(totals)}]')
-        print(f'  {counter} {tilde(source):<{width}}  {size_cell(totals[source]["files"], totals[source]["bytes"])}', flush=True)
-        if restore_group(
-            snapshot_dir, source, args.to, manifest_home, target_home, args.on_conflict, args.skip_symlinked, symlinks, args.dry_run
-        ):
-            restored.append(source)
+    entries = []
+    decision = {'all': None}
+    width = max(len(tilde(row['source'])) for row in rows)
+    for position, row in enumerate(rows, start=1):
+        # Printed before the work rather than after it: this line is what says which source the
+        # wait belongs to, and after the fact it says nothing that was not already known. The
+        # kinds are on it because a repo's path alone reads as though the repo is being
+        # restored, when what a snapshot holds is the files git could not put back.
+        counter = cyan(f'[{position}/{len(rows)}]')
+        sizes = size_cell(row['files'], row['bytes'])
+        print(f'  {counter} {tilde(row["source"]):<{width}}  {sizes}  {cyan(kinds_label(row["kinds"]))}', flush=True)
+        try:
+            restored_entries = restore_source(snapshot_dir, row, args.to, manifest_home, target_home, symlinks, kinds, args, decision)
+        except RestoreAborted:
+            print(f'\n  {yellow("stopped here")} — the sources already restored are left as they are')
+            break
+        if restored_entries is not None:
+            restored.append(row['source'])
+            entries.extend(restored_entries)
 
-    if restored:
-        count = apply_modes(manifest, restored, args.to, args.dry_run)
-        if args.dry_run:
-            print(f'\n  {yellow("would reapply")} {bold(plural(count, "recorded mode"))}')
-        else:
-            print(f'\n  {green("reapplied")} modes to {bold(plural(count, "path"))}')
+    if entries:
+        changed, recorded = apply_modes(manifest, entries, args.dry_run)
+        label = yellow('would set') if args.dry_run else green('set')
+        detail = f' ({plural(recorded, "recorded deviation")})' if recorded else ''
+        print(f'\n  {label} modes on {bold(plural(changed, "path"))}{detail}')
 
     restored_symlinks = paths_under_any(restored, ['/' + rel for rel in symlinks])
     if restored_symlinks and not args.skip_symlinked:
@@ -1223,21 +1526,21 @@ def do_restore(config, config_path, args):
         print(f'  remove them and run {cyan("dotfiles link")} to restore the symlinks, or use {cyan("--skip-symlinked")} next time')
 
     label = yellow('would restore') if args.dry_run else green('restored')
-    print(f'\n{bold("safekeep:")} {label} {bold(plural(len(restored), "group"))} to {cyan(args.to)}')
+    print(f'\n{bold("safekeep:")} {label} {bold(plural(len(restored), "source"))} to {cyan(args.to)}')
 
 
 def select_sources(entries, args):
-    """The entries a backup run covers: every one, or those matching --tag/--group.
+    """The entries a backup run covers: every one, or those matching --tag/--source.
 
     Bare `backup` already means everything, so these narrow rather than enable and there is no
     --all to forget. That is the opposite of restore, where selection is required and never
     inferred -- a backup that silently covered less than asked is the failure to design out,
     and a restore that silently covered more.
     """
-    if not args.tag and not args.group:
+    if not args.tag and not args.source:
         return entries
     return [
-        (path, tags) for path, tags in entries if any(tag in tags for tag in args.tag) or any(needle in str(path) for needle in args.group)
+        (path, tags) for path, tags in entries if any(tag in tags for tag in args.tag) or any(needle in str(path) for needle in args.source)
     ]
 
 
@@ -1255,7 +1558,7 @@ def require_known_selection(config, config_path, args):
         print(f'{red("safekeep:")} no entry in {cyan(config_path.name)} carries {yellow(", ".join(unknown))}', file=sys.stderr)
         print(f'  tags: {green(", ".join(known)) if known else yellow("none")}', file=sys.stderr)
         sys.exit(2)
-    for needle in args.group:
+    for needle in args.source:
         if not any(needle in str(path) for _, path, _ in entries):
             print(f'{red("safekeep:")} no path in the config contains {yellow(needle)}', file=sys.stderr)
             for _, path, _ in entries:
@@ -1290,9 +1593,9 @@ def merge_manifest(existing, manifest):
 
 def do_backup(config, config_path, warnings, args):
     print(f'{bold("safekeep:")} using config {cyan(config_path.name)}', flush=True)
-    if args.tag or args.group:
+    if args.tag or args.source:
         require_known_selection(config, config_path, args)
-        print(f'  {yellow("narrowed to")} sources matching {bold(", ".join(args.tag + args.group))}', flush=True)
+        print(f'  {yellow("narrowed to")} sources matching {bold(", ".join(args.tag + args.source))}', flush=True)
 
     start_time = time.monotonic()
     dest = Path(config['back_up_to']).expanduser()
@@ -1363,10 +1666,20 @@ def do_backup(config, config_path, warnings, args):
             filtered = [f for f in untracked if not matches_exclude(str(f), excludes)]
             survey = survey_files(filtered, max_size_mb)
             merge_survey(manifest, survey)
-            manifest['groups'].append(
-                {'kind': 'git_untracked', 'source': str(repo_path), 'tags': tags, 'files': survey['files'], 'bytes': survey['bytes']}
-            )
             copyable = [f for f in filtered if snapshot_rel(f) not in {s['path'].lstrip('/') for s in survey['skipped_large']}]
+            manifest['groups'].append(
+                {
+                    'kind': 'git_untracked',
+                    'source': str(repo_path),
+                    'tags': tags,
+                    'files': survey['files'],
+                    'bytes': survey['bytes'],
+                    # The file list, so a restore can say which of a repo's files it just wrote
+                    # was untracked and which was gitignored. Only the git groups carry one --
+                    # see file_kinds.
+                    'paths': [snapshot_rel(f) for f in copyable],
+                }
+            )
             rsync_untracked(copyable, dest_base, args.dry_run)
             label = yellow('would copy') if args.dry_run else green('copied')
             print(f'  {label} {bold(plural(survey["files"], "untracked file"))} from {cyan(str(repo_path))}')
@@ -1382,10 +1695,17 @@ def do_backup(config, config_path, warnings, args):
                 continue
             survey = survey_files(filtered, max_size_mb)
             merge_survey(manifest, survey)
-            manifest['groups'].append(
-                {'kind': 'git_ignored', 'source': str(repo_path), 'tags': tags, 'files': survey['files'], 'bytes': survey['bytes']}
-            )
             copyable = [f for f in filtered if snapshot_rel(f) not in {s['path'].lstrip('/') for s in survey['skipped_large']}]
+            manifest['groups'].append(
+                {
+                    'kind': 'git_ignored',
+                    'source': str(repo_path),
+                    'tags': tags,
+                    'files': survey['files'],
+                    'bytes': survey['bytes'],
+                    'paths': [snapshot_rel(f) for f in copyable],
+                }
+            )
             rsync_untracked(copyable, dest_base, args.dry_run)
             label = yellow('would copy') if args.dry_run else green('copied')
             print(f'  {label} {bold(plural(survey["files"], "ignored file"))} from {cyan(str(repo_path))}')
@@ -1516,7 +1836,7 @@ def show_help():
     help_row('safekeep backup', '[--tag <name>]', "Copy the configured paths into today's snapshot")
     help_row('safekeep snapshots', '', 'List the snapshots at the destination')
     help_row('safekeep tags', '[name]', 'What each tag covers, and what it would restore')
-    help_row('safekeep restore', '--to <path>', 'Restore groups from a snapshot')
+    help_row('safekeep restore', '--to <path>', 'Restore sources from a snapshot')
     help_row('safekeep config', '<verb>', 'Inspect and create config files')
     help_row('safekeep update', '', 'Install the newest release')
 
@@ -1561,10 +1881,10 @@ def show_backup_help():
     help_section('Selection')
     help_text('  Everything the config lists, unless one of these narrows it:')
     help_row('--tag', '<name>', 'Only entries carrying NAME (repeatable)')
-    help_row('--group', '<path>', 'Only entries whose path contains PATH (repeatable)')
+    help_row('--source', '<path>', 'Only entries whose path contains PATH (repeatable)')
     help_text(
         "  A narrowed run merges into the day's snapshot rather than replacing it, so the",
-        '  groups it did not cover stay recorded and restorable.',
+        '  sources it did not cover stay recorded and restorable.',
         '  safekeep tags is what says which names there are to narrow by.',
     )
 
@@ -1576,21 +1896,22 @@ def show_backup_help():
     help_row('safekeep backup', '', 'Everything the config lists')
     help_row('safekeep backup -n', '', 'What a backup would copy, before it copies it')
     help_row('safekeep backup --tag secrets', '', 'Just the secrets, before doing something risky')
-    help_row('safekeep backup --group ~/notes', '', 'One path, without walking the rest')
+    help_row('safekeep backup --source ~/notes', '', 'One path, without walking the rest')
 
     help_end()
 
 
 def show_restore_help():
-    help_header('safekeep restore', 'Restore groups from a snapshot.')
+    help_header('safekeep restore', 'Restore sources from a snapshot.')
     help_usage('safekeep restore --to <path> <selection> [OPTIONS]')
 
     help_section('Selection')
     help_text('  Required, and never inferred. Pass at least one:')
-    help_row('--all', '', 'Every group in the snapshot')
-    help_row('--group', '<path>', 'Groups whose source contains PATH (repeatable)')
-    help_row('--tag', '<name>', 'Groups carrying NAME (repeatable)')
+    help_row('--all', '', 'Every source in the snapshot')
+    help_row('--source', '<path>', 'Sources whose path contains PATH (repeatable)')
+    help_row('--tag', '<name>', 'Sources carrying NAME (repeatable)')
     help_text(
+        "  A source is one config entry — a path, or one repo's untracked and ignored files.",
         '  A tag selects on the snapshot, which carries the tags its config had that day.',
         '  `safekeep tags <name>` is what says whether this one selects anything.',
     )
@@ -1598,10 +1919,16 @@ def show_restore_help():
     help_section('Options')
     help_row('--to', '<path>', 'Restore target root (/ for a real restore)')
     help_row('--from', '<date>', 'Snapshot to restore from (default: pick, else newest)')
-    help_row('--on-conflict', '<mode>', 'backup (default), skip, overwrite, newer')
+    help_row('--on-conflict', '<mode>', 'backup (default), skip, overwrite, newer, ask')
     help_row('--skip-symlinked', '', 'Skip paths that were symlinks when backed up')
     help_row('-n, --dry-run', '', 'Show what would be restored, change nothing')
     help_row('-h, --help', '', 'Show this help')
+    help_text(
+        '  Every file is named as it is written, marked + for new and ~ for replaced.',
+        '  backup keeps the file it replaced beside it as <name>.pre-restore.',
+        '  ask names each existing file and waits for a decision — [y]es [N]o [a]ll',
+        '  [k]eep all [q]uit — and keeps no copies, since you were asked.',
+    )
 
     help_section('Examples')
     help_row('safekeep restore --to /tmp/rehearsal --all', '', 'Rehearse first — always')
@@ -1645,7 +1972,10 @@ def build_parser():
     backup = commands.add_parser('backup', add_help=False)
     backup.add_argument('-h', '--help', action='store_true', dest='show_help')
     backup.add_argument('--tag', action='append', default=[], metavar='NAME')
-    backup.add_argument('--group', action='append', default=[], metavar='PATH')
+    # --group is the name this had before "group" turned out to mean nothing to anyone reading
+    # the output. Kept as an alias rather than retired: it is one word in a shell history, and
+    # nothing about accepting it can make a backup cover less than it was asked to.
+    backup.add_argument('--source', '--group', dest='source', action='append', default=[], metavar='PATH')
     backup.add_argument('-n', '--dry-run', action='store_true')
 
     snapshots = commands.add_parser('snapshots', add_help=False)
@@ -1664,9 +1994,9 @@ def build_parser():
     restore.add_argument('--to', metavar='PATH')
     restore.add_argument('--from', dest='from_date', metavar='DATE')
     restore.add_argument('--all', action='store_true')
-    restore.add_argument('--group', action='append', default=[], metavar='PATH')
+    restore.add_argument('--source', '--group', dest='source', action='append', default=[], metavar='PATH')
     restore.add_argument('--tag', action='append', default=[], metavar='NAME')
-    restore.add_argument('--on-conflict', choices=['backup', 'skip', 'overwrite', 'newer'], default='backup')
+    restore.add_argument('--on-conflict', choices=['backup', 'skip', 'overwrite', 'newer', 'ask'], default='backup')
     restore.add_argument('--skip-symlinked', action='store_true')
     restore.add_argument('-n', '--dry-run', action='store_true')
 
@@ -1687,10 +2017,13 @@ def build_parser():
     config_edit = config_commands.add_parser('edit', add_help=False)
     config_edit.add_argument('-h', '--help', action='store_true', dest='show_help')
 
-    # Undocumented on purpose: this renders a snapshot's manifest for the picker, so it is
-    # machine plumbing rather than a verb anyone types.
+    # Undocumented on purpose: these render a snapshot and a source for the pickers, so they
+    # are machine plumbing rather than verbs anyone types.
     preview = commands.add_parser('preview-snapshot', add_help=False)
     preview.add_argument('date', metavar='DATE')
+    preview_one = commands.add_parser('preview-source', add_help=False)
+    preview_one.add_argument('date', metavar='DATE')
+    preview_one.add_argument('source', metavar='PATH')
 
     # Kept so main() can tell a command typed alone from one that stated its intent and omitted
     # an option -- the first shows help, the second gets an error naming what is missing.
@@ -1800,6 +2133,8 @@ def main():
 
     if args.command == 'preview-snapshot':
         preview_snapshot(Path(config['back_up_to']).expanduser(), args.date)
+    elif args.command == 'preview-source':
+        preview_source(Path(config['back_up_to']).expanduser(), args.date, args.source)
     elif args.command == 'config':
         show_config(config_path, config, warnings)
     elif args.command == 'snapshots':

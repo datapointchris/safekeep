@@ -23,7 +23,7 @@ safekeep backup                  # copy the configured paths into today's snapsh
 safekeep backup --tag work       # tag the snapshot
 safekeep snapshots               # list what is at the destination
 safekeep tags                    # what each tag covers, and what it would restore
-safekeep restore --to ./here     # restore groups from a snapshot
+safekeep restore --to ./here     # restore sources from a snapshot
 safekeep config example          # print a starting config
 ```
 
