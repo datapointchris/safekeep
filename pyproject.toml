@@ -74,6 +74,10 @@ warn_return_any = false
 typeCheckingMode = "standard"
 analyzeUnannotatedFunctions = true
 
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B404", "B603", "B607"]
+
 [tool.codespell]
 check-filenames = true
 
