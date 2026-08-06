@@ -31,6 +31,80 @@ dependencies = ["pytermstyle"]
 # change what a release of this builds against.
 pytermstyle = { git = "https://github.com/datapointchris/pytermstyle", tag = "v0.1.1" }
 
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort
+]
+ignore = [
+    "SIM108",  # ternary operator — often less readable
+]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+pretty = true
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_return_any = false
+
+[tool.pyright]
+typeCheckingMode = "standard"
+analyzeUnannotatedFunctions = true
+
+[tool.codespell]
+check-filenames = true
+
+[tool.pytest.ini_options]
+addopts = "-vv"
+minversion = "8.0"
+testpaths = ["tests"]
+
+[tool.forge]
+# Keys the standard owns, written by `forge dies run maintenance/sync-pyproject.sh`.
+# Dropping one from the template removes it here on the next sync; a key absent
+# from this list belongs to the project and is never touched. Do not hand-edit.
+managed = [
+    ["ruff", "line-length"],
+    ["ruff", "format", "quote-style"],
+    ["ruff", "format", "indent-style"],
+    ["ruff", "format", "skip-magic-trailing-comma"],
+    ["ruff", "format", "line-ending"],
+    ["ruff", "format", "docstring-code-format"],
+    ["ruff", "lint", "select"],
+    ["ruff", "lint", "ignore"],
+    ["ruff", "lint", "isort", "force-single-line"],
+    ["ruff", "lint", "per-file-ignores", "__init__.py"],
+    ["mypy", "pretty"],
+    ["mypy", "ignore_missing_imports"],
+    ["mypy", "check_untyped_defs"],
+    ["mypy", "warn_return_any"],
+    ["pyright", "typeCheckingMode"],
+    ["pyright", "analyzeUnannotatedFunctions"],
+    ["codespell", "check-filenames"],
+    ["pytest", "ini_options", "addopts"],
+    ["pytest", "ini_options", "minversion"],
+    ["pytest", "ini_options", "testpaths"],
+]
+
 [project.scripts]
 safekeep = "safekeep:main"
 
