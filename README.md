@@ -30,6 +30,9 @@ safekeep config example          # print a starting config
 Bare `safekeep` prints usage. Nothing writes without an explicit verb. `safekeep --help` is the one
 copy of the command surface — it is not repeated here.
 
+[`docs/reference.md`](docs/reference.md) is the full behaviour: the manifest format, the restore
+conflict policies, the schema-change rules, and the reasoning behind each of them.
+
 ## Config
 
 `~/.config/safekeep/<name>.toml`, selected with `-c <name>`. The manifest stays JSON, because
