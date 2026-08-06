@@ -389,6 +389,10 @@ def test_backup_writes_manifest_with_groups_and_tags(tmp_path, source_tree):
 
     assert manifest['version'] == safekeep.MANIFEST_VERSION
     assert manifest['home'] == str(Path.home())
+    # Which build wrote this, beside which format it wrote. A snapshot outlives
+    # the machine, so a future format change has to be attributable to a release
+    # rather than guessed at from the shape of the file.
+    assert manifest['safekeep_version'] == safekeep.tool_version()
     group = manifest['groups'][0]
     assert group['kind'] == 'path'
     assert group['source'] == str(source_tree / 'notes')
@@ -1150,3 +1154,26 @@ def test_fzf_is_only_required_for_interactive_selection(tmp_path, source_tree):
     )
     assert result.returncode == 0, result.stderr
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
+
+
+# --- version and self-update ------------------------------------------------------------
+
+
+def test_version_flag_prints_the_running_version():
+    result = run_safekeep('--version')
+    assert result.returncode == 0, result.stderr
+    assert safekeep.tool_version() in result.stdout
+
+
+def test_version_is_read_from_the_installed_metadata():
+    """Not a constant in the source. semantic-release writes pyproject, and a second
+    copy in the module would be the one that goes stale."""
+    assert safekeep.tool_version() != 'unknown', 'the test environment installs safekeep'
+    assert 'safekeep' not in safekeep.tool_version()
+
+
+def test_update_is_a_command_rather_than_a_usage_error():
+    """Parsed here rather than run, because running it reaches the network. That the
+    verb resolves at all is what a typo in the parser would break."""
+    args = safekeep.build_parser().parse_args(['update'])
+    assert args.command == 'update'

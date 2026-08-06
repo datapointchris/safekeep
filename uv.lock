@@ -473,6 +473,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyselfupdate"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/5c/e04d57be6b1ef112af6f7f2cbbdfca24422c3d2d1693e75a13a11a557c00/pyselfupdate-0.2.2.tar.gz", hash = "sha256:4c7ae5ef33c7236486e0dfafd4e450d3f8bf68a94dc61feeb9959fc376f1ed0e", size = 22088, upload-time = "2026-08-04T22:05:12.655Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/24/92e4b0fd575e537488ef0fce2fee36adb0ec058ac42d083796264101029c/pyselfupdate-0.2.2-py3-none-any.whl", hash = "sha256:2a99d98714ebdd33bd2cfdae1fba32027525c10f3aac0084459a3a352da373b1", size = 26550, upload-time = "2026-08-04T22:05:11.802Z" },
+]
+
+[[package]]
 name = "pytermstyle"
 version = "0.1.1"
 source = { git = "https://github.com/datapointchris/pytermstyle?tag=v0.1.1#bef61a95120df523758029eac6692898140e4262" }
@@ -608,6 +617,7 @@ name = "safekeep"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pyselfupdate" },
     { name = "pytermstyle" },
 ]
 
@@ -623,7 +633,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytermstyle", git = "https://github.com/datapointchris/pytermstyle?tag=v0.1.1" }]
+requires-dist = [
+    { name = "pyselfupdate", specifier = ">=0.2.2" },
+    { name = "pytermstyle", git = "https://github.com/datapointchris/pytermstyle?tag=v0.1.1" },
+]
 
 [package.metadata.requires-dev]
 dev = [

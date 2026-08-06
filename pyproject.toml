@@ -22,9 +22,13 @@ classifiers = [
 requires-python = ">=3.12"
 
 # The house palette and help grammar, so safekeep's screens match every other
-# CLI on PATH. Everything else is stdlib: the config is read with tomllib and
-# the copying is rsync.
-dependencies = ["pytermstyle"]
+# CLI on PATH, and the fleet's notify-only self-update. Both are themselves
+# dependency-free, so the copying is still rsync and the config is still read
+# with stdlib tomllib.
+# pyselfupdate resolves from PyPI and pytermstyle from git, purely because
+# 'pytermstyle' was already taken there. No [typer] extra — safekeep is argparse,
+# and that extra exists only for the ready-made typer command.
+dependencies = ["pytermstyle", "pyselfupdate>=0.2.2"]
 
 [tool.uv.sources]
 # Pinned to a tag rather than tracking main, so a push to pytermstyle cannot

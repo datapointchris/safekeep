@@ -28,8 +28,14 @@ import tomllib
 from datetime import datetime
 from fnmatch import fnmatch
 from functools import cache
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as installed_version
 from pathlib import Path
 
+from pyselfupdate import Config
+from pyselfupdate import SelfUpdateError
+from pyselfupdate import notify
+from pyselfupdate import update
 from pytermstyle import bold
 from pytermstyle import clip
 from pytermstyle import cyan
@@ -91,6 +97,26 @@ SINGLE_TAG_EXAMPLE = 'tags = ["wsl"]'
 
 MANIFEST_NAME = '.safekeep-manifest.json'
 MANIFEST_VERSION = 1
+
+
+def tool_version() -> str:
+    """This build's version, or 'unknown' when running from a source checkout.
+
+    Read from the installed distribution metadata rather than a constant in this
+    file, so there is one version and semantic-release owns it. A source checkout
+    that was never installed has no metadata, and says so instead of inventing a
+    number -- release.md is explicit that a version string can never be used to
+    tell a release from a dev build.
+    """
+    try:
+        return installed_version('safekeep')
+    except PackageNotFoundError:
+        return 'unknown'
+
+
+# Notify-only, per ~/dev/standards/release.md. One check per 24h, one line to
+# stderr, and `safekeep update` is the only thing that writes anything.
+UPDATE_CONFIG = Config(tool='safekeep', owner='datapointchris')
 
 # Destination is typically SMB/DrvFs, which cannot store Unix modes, so the backup is
 # written with --no-perms and every file arrives with the same mode. Restore reapplies
@@ -860,8 +886,10 @@ def pick_snapshot(dest, config_name):
         print(f'{red("safekeep:")} no restorable snapshots at {cyan(str(dest))}', file=sys.stderr)
         sys.exit(1)
 
-    script = Path(__file__).resolve()
-    preview_cmd = f'{sys.executable} {script} --config {config_name} preview-snapshot {{1}}'
+    # `-m safekeep` rather than this file's path: as a package, __file__ is
+    # src/safekeep/__init__.py, and running that directly re-imports the module
+    # under the name __main__ instead of resolving the installed package.
+    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} preview-snapshot {{1}}'
 
     lines = []
     for snapshot_dir, manifest in snapshots:
@@ -1285,6 +1313,11 @@ def do_backup(config, config_path, warnings, args):
 
     manifest = {
         'version': MANIFEST_VERSION,
+        # What wrote this snapshot, beside the format version it wrote. Additive,
+        # so older snapshots still read; the point is that a future format change
+        # is diagnosable rather than mysterious -- 'version' says what the shape
+        # is, this says which build chose that shape.
+        'safekeep_version': tool_version(),
         'created': datetime.now().isoformat(timespec='seconds'),
         'hostname': os.uname().nodename,
         'home': str(Path.home()),
@@ -1485,9 +1518,11 @@ def show_help():
     help_row('safekeep tags', '[name]', 'What each tag covers, and what it would restore')
     help_row('safekeep restore', '--to <path>', 'Restore groups from a snapshot')
     help_row('safekeep config', '<verb>', 'Inspect and create config files')
+    help_row('safekeep update', '', 'Install the newest release')
 
     help_section('Options')
     help_row('-c, --config', '<name|path>', 'Config to use (default: auto-detect)')
+    help_row('-V, --version', '', 'Print the running version')
     help_row('-h, --help', '', 'Show this help')
     help_text(
         '  Both go before the command: safekeep -c work backup',
@@ -1600,8 +1635,12 @@ def build_parser():
     argparse carries no help= strings that would be a second copy able to drift."""
     parser = argparse.ArgumentParser(prog='safekeep', add_help=False)
     parser.add_argument('-h', '--help', action='store_true', dest='show_help')
+    parser.add_argument('-V', '--version', action='store_true', dest='show_version')
     parser.add_argument('-c', '--config')
     commands = parser.add_subparsers(dest='command', metavar='COMMAND')
+
+    update_cmd = commands.add_parser('update', add_help=False)
+    update_cmd.add_argument('-h', '--help', action='store_true', dest='show_help')
 
     backup = commands.add_parser('backup', add_help=False)
     backup.add_argument('-h', '--help', action='store_true', dest='show_help')
@@ -1689,6 +1728,28 @@ def typed_alone(parser, args):
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    if getattr(args, 'show_version', False):
+        print(f'safekeep {tool_version()}')
+        sys.exit(0)
+
+    if args.command == 'update' and not getattr(args, 'show_help', False):
+        try:
+            result = update(UPDATE_CONFIG)
+        except SelfUpdateError as error:
+            # Errors surface only here. The notice path swallows them into the
+            # state file by design, so this is the one place they can be seen.
+            print(f'{red("safekeep:")} {error}', file=sys.stderr)
+            sys.exit(1)
+        if result.applied:
+            print(f'{green("safekeep")} updated {result.current} → {cyan(result.latest)}')
+        else:
+            print(f'safekeep is already at {cyan(result.current)}')
+        sys.exit(0)
+
+    # Deferred: pyselfupdate registers an atexit hook, so the one-line notice
+    # lands after this command's own output rather than on top of it.
+    notify(UPDATE_CONFIG)
 
     if getattr(args, 'show_help', False):
         # An explicit --help is a satisfied request, so it exits 0 where a bare or
