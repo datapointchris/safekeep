@@ -1,6 +1,28 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-08-07)
+
+### Chores
+
+- **lint**: Disable SC1091/SC1090 from the forge toolchain
+  ([`243839d`](https://github.com/datapointchris/safekeep/commit/243839d9bfd3c713fc93d6428e34f87e59532973))
+
+### Features
+
+- Hard-link unchanged files into the next snapshot
+  ([`5ffcc3b`](https://github.com/datapointchris/safekeep/commit/5ffcc3b07150ed1c43376551628b41879a1ff0e3))
+
+Every dated snapshot was a full copy, which is what made a second incremental backup tool worth
+  keeping. --link-dest against the previous snapshot puts the dedup inside the tool that already has
+  the manifest, the restore conflict policies and the tag model, so there is one storage model
+  instead of two.
+
+Snapshots stay complete browsable trees with no chain to walk, and deleting one is still safe. The
+  manifest records linked_from so the inode sharing is visible rather than inferable from a link
+  count, and openrsync, which has no --link-dest, silently degrades to a full copy.
+
+
 ## v0.3.0 (2026-08-06)
 
 ### Bug Fixes
