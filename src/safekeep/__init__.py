@@ -9,6 +9,9 @@ machine.
 Primary use case: backing up scattered config files, local scripts, and git-untracked
 WIP to a network drive that cannot represent Unix modes.
 
+Unchanged files are hard-linked into the previous snapshot, so snapshots stay complete
+trees while costing only what changed. That is why there is no retention policy.
+
 Config: ~/.config/safekeep/<name>.toml (the manifest stays JSON -- machines write it)
 
 Bare `safekeep` prints usage. Nothing writes without an explicit verb. The command
@@ -550,7 +553,22 @@ def merge_survey(manifest, survey):
     manifest['skipped_large'].extend(survey['skipped_large'])
 
 
-def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None):
+def link_dest_flags(link_dest):
+    """--link-dest against the previous snapshot, when there is one and this rsync has it.
+
+    Unchanged files then cost a hard link rather than a copy, so keeping every snapshot forever
+    stays affordable — which is the policy, snapshots are never pruned. Absolute, because rsync
+    resolves a relative --link-dest against the destination directory and the two are siblings.
+
+    Silently absent on openrsync, which has no --link-dest: the snapshot is a full copy instead,
+    identical in content and restorable by the same code. Degrading is the whole point of asking.
+    """
+    if link_dest is None or not rsync_supports('--link-dest'):
+        return []
+    return [f'--link-dest={Path(link_dest).resolve()}']
+
+
+def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None, link_dest=None):
     """Rsync absolute paths into dest_base, preserving full directory structure.
 
     Uses rsync --relative with absolute paths so that '/home/chris/.ssh/config'
@@ -564,6 +582,7 @@ def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None):
         dest_base.mkdir(parents=True, exist_ok=True)
 
     cmd = ['rsync', '-av', '--no-perms', '--chmod=Du+w', '--relative', '--copy-links']
+    cmd.extend(link_dest_flags(link_dest))
     for pattern in excludes:
         cmd.extend(['--exclude', pattern])
     if max_size_mb is not None:
@@ -576,7 +595,7 @@ def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None):
     run_rsync(cmd)
 
 
-def rsync_untracked(files, dest_base, dry_run=False):
+def rsync_untracked(files, dest_base, dry_run=False, link_dest=None):
     """Rsync individual untracked files preserving full path structure.
 
     Uses --files-from with / as the base for efficiency when copying many
@@ -595,6 +614,7 @@ def rsync_untracked(files, dest_base, dry_run=False):
 
     try:
         cmd = ['rsync', '-av', '--no-perms', '--files-from', tmp_path, '/', str(dest_base) + '/']
+        cmd.extend(link_dest_flags(link_dest))
         if dry_run:
             cmd.append('-n')
         run_rsync(cmd)
@@ -712,6 +732,19 @@ def list_snapshots(dest):
         return []
     dated = [d for d in dest.iterdir() if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-']
     return [(d, read_manifest(d)) for d in sorted(dated, key=lambda d: d.name, reverse=True)]
+
+
+def previous_snapshot(dest, date_dir):
+    """The newest snapshot to hard-link unchanged files against, or None on the first run.
+
+    Today's own directory is excluded: a second run on the same day adds to a snapshot in
+    progress, and linking a tree against itself is both meaningless and a way to lose the
+    freshly-copied version of a file that changed between the two runs.
+    """
+    for snapshot_dir, _ in list_snapshots(dest):
+        if snapshot_dir.name != date_dir:
+            return snapshot_dir
+    return None
 
 
 def group_id(group):
@@ -1616,6 +1649,7 @@ def do_backup(config, config_path, warnings, args):
 
     date_dir = datetime.now().strftime('%Y-%m-%d')
     dest_base = dest / date_dir
+    link_dest = previous_snapshot(dest, date_dir)
 
     manifest = {
         'version': MANIFEST_VERSION,
@@ -1628,6 +1662,10 @@ def do_backup(config, config_path, warnings, args):
         'hostname': os.uname().nodename,
         'home': str(Path.home()),
         'config_name': config_path.stem,
+        # Which snapshot this one shares inodes with, so the sharing is visible to whoever
+        # reads the manifest rather than inferable only from a link count. None means a full
+        # copy: the first run, or an rsync without --link-dest.
+        'linked_from': link_dest.name if link_dest is not None and rsync_supports('--link-dest') else None,
         'excludes': excludes,
         'max_file_size_mb': max_size_mb,
         'default_file_mode': f'{DEFAULT_FILE_MODE:04o}',
@@ -1653,7 +1691,7 @@ def do_backup(config, config_path, warnings, args):
                 {'kind': 'path', 'source': str(path), 'tags': tags, 'files': survey['files'], 'bytes': survey['bytes']}
             )
             present.append(path)
-        rsync_paths(present, dest_base, excludes, args.dry_run, max_size_mb)
+        rsync_paths(present, dest_base, excludes, args.dry_run, max_size_mb, link_dest)
         label = yellow('would copy') if args.dry_run else green('copied')
         print(f'  {label} {bold(plural(len(present), "path"))}')
 
@@ -1683,7 +1721,7 @@ def do_backup(config, config_path, warnings, args):
                     'paths': [snapshot_rel(f) for f in copyable],
                 }
             )
-            rsync_untracked(copyable, dest_base, args.dry_run)
+            rsync_untracked(copyable, dest_base, args.dry_run, link_dest)
             label = yellow('would copy') if args.dry_run else green('copied')
             print(f'  {label} {bold(plural(survey["files"], "untracked file"))} from {cyan(str(repo_path))}')
 
@@ -1709,7 +1747,7 @@ def do_backup(config, config_path, warnings, args):
                     'paths': [snapshot_rel(f) for f in copyable],
                 }
             )
-            rsync_untracked(copyable, dest_base, args.dry_run)
+            rsync_untracked(copyable, dest_base, args.dry_run, link_dest)
             label = yellow('would copy') if args.dry_run else green('copied')
             print(f'  {label} {bold(plural(survey["files"], "ignored file"))} from {cyan(str(repo_path))}')
 

@@ -142,6 +142,18 @@ Path construction: `back_up_to / YYYY-MM-DD / absolute-path-from-root`
 
 **Snapshots are never pruned.** Deciding how many backups to keep is not safekeep's job.
 
+**Unchanged files are hard links into the previous snapshot** (`rsync --link-dest`), so keeping
+every snapshot forever costs only what actually changed. Every snapshot still browses and restores
+as a complete tree — there is no chain to walk and no base snapshot that others depend on. The
+manifest's `linked_from` names the snapshot the inodes are shared with, or is `null` for a full
+copy: the first run, or an rsync without `--link-dest`, which is what macOS ships as
+`/usr/bin/openrsync`. Deleting a snapshot directory is always safe; the data survives as long as
+any other snapshot links it.
+
+The hazard is the same one the hard links buy the saving with: a shared file is the *same inode*
+in every snapshot holding it, so editing one in place edits all of them. Copy out before touching
+anything, and never edit inside the destination. Restore only ever reads, so it is unaffected.
+
 ## The Manifest
 
 `.safekeep-manifest.json` is written into each snapshot and is what makes it restorable on a machine that no longer has the config. It records the groups collected (kind, source, tags, counts, sizes), the source `home` for remapping, file modes, symlink origins, oversized files that were skipped, and any config warnings.
@@ -256,7 +268,7 @@ If the snapshot's home differs from the restoring machine's, paths under it are 
 
 ## See Also
 
-- [backmeup](https://datapointchris.github.io/dotfiles/apps/backmeup/) — timestamped tar+zstd
+- [packup](https://datapointchris.github.io/dotfiles/apps/backup/) — timestamped tar+zstd
   archives, the complementary tool
 - [Tool Composition](https://datapointchris.github.io/dotfiles/architecture/tool-composition/) —
   how safekeep fits into the wider toolchain

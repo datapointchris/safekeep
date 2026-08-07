@@ -10,6 +10,10 @@ where the config died with the machine.
 The primary destination is a network drive that cannot represent Unix modes. Recording them in the
 manifest is the whole point: the copy loses them, and the restore puts them back.
 
+Snapshots are never pruned, and they do not need to be: unchanged files are hard links into the
+previous snapshot, so each one costs only what changed while still browsing and restoring as a
+complete tree.
+
 ## What it is for
 
 Scattered config files, local scripts, and git-untracked work in progress — the things that are not

@@ -597,6 +597,82 @@ def test_backup_does_not_prune_old_snapshots(tmp_path, source_tree):
     assert (dest / '2020-01-03').exists()
 
 
+def age_todays_snapshot(dest, to_date='2020-01-01'):
+    """Rename the snapshot just written so the next run sees it as the previous one.
+
+    do_backup names the directory from datetime.now(), so a second snapshot cannot be produced
+    within a test any other way. Renaming exercises the real lookup rather than a stub, because
+    previous_snapshot only ever reads directory names.
+    """
+    today = next(d for d in dest.iterdir() if d.is_dir())
+    aged = dest / to_date
+    today.rename(aged)
+    return aged
+
+
+def snapshot_copy_of(snapshot_dir, source_file):
+    return snapshot_dir / safekeep.snapshot_rel(source_file)
+
+
+def test_an_unchanged_file_is_hard_linked_into_the_next_snapshot(tmp_path, source_tree):
+    """The dedup that made backup-incremental a separate tool, inside the tool with the manifest."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    plain = source_tree / 'notes' / 'plain.md'
+
+    run_safekeep('--config', str(config_path), 'backup')
+    previous = age_todays_snapshot(dest)
+    run_safekeep('--config', str(config_path), 'backup')
+    current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
+
+    assert snapshot_copy_of(current, plain).stat().st_ino == snapshot_copy_of(previous, plain).stat().st_ino
+
+
+def test_a_changed_file_is_copied_rather_than_linked(tmp_path, source_tree):
+    """The hazard the linking creates: a shared inode must never carry a new version."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    plain = source_tree / 'notes' / 'plain.md'
+
+    run_safekeep('--config', str(config_path), 'backup')
+    previous = age_todays_snapshot(dest)
+    plain.write_text('edited\n')
+    run_safekeep('--config', str(config_path), 'backup')
+    current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
+
+    assert snapshot_copy_of(current, plain).read_text() == 'edited\n'
+    assert snapshot_copy_of(previous, plain).read_text() == 'plain\n'
+    assert snapshot_copy_of(current, plain).stat().st_ino != snapshot_copy_of(previous, plain).stat().st_ino
+
+
+def test_the_manifest_names_the_snapshot_it_shares_inodes_with(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+
+    run_safekeep('--config', str(config_path), 'backup')
+    previous = age_todays_snapshot(dest)
+    assert json.loads((previous / safekeep.MANIFEST_NAME).read_text())['linked_from'] is None
+
+    run_safekeep('--config', str(config_path), 'backup')
+    current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
+    assert json.loads((current / safekeep.MANIFEST_NAME).read_text())['linked_from'] == '2020-01-01'
+
+
+def test_a_second_run_the_same_day_does_not_link_against_itself(tmp_path, source_tree):
+    """Linking a snapshot in progress against itself would pin the version it is replacing."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    plain = source_tree / 'notes' / 'plain.md'
+
+    run_safekeep('--config', str(config_path), 'backup')
+    today = next(d for d in dest.iterdir() if d.is_dir())
+    plain.write_text('same day edit\n')
+    run_safekeep('--config', str(config_path), 'backup')
+
+    assert json.loads((today / safekeep.MANIFEST_NAME).read_text())['linked_from'] is None
+    assert snapshot_copy_of(today, plain).read_text() == 'same day edit\n'
+
+
 def git(*args: str, cwd: Path) -> None:
     """Run git in a throwaway repo with the ambient git environment scrubbed.
 
