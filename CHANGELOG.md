@@ -1,6 +1,33 @@
 # CHANGELOG
 
 
+## v0.5.0 (2026-08-08)
+
+### Chores
+
+- **lint**: Ignore the generated CHANGELOG.md
+  ([`3c394b8`](https://github.com/datapointchris/safekeep/commit/3c394b8bf7b489c0b3cf7ad0adb850867e70cab8))
+
+semantic-release rewrites CHANGELOG.md on every release, so markdownlint --fix normalizing it is
+  undone on the next one and resurfaces as a rebase conflict when a local commit lands on top of the
+  release commit.
+
+### Features
+
+- Add --no-input to force the non-interactive path
+  ([`c16ba8d`](https://github.com/datapointchris/safekeep/commit/c16ba8d2028e65c774bbda6dea3c4b5cfb3e404a))
+
+restore already refused to ask without a terminal, on all three of its interactive paths — the
+  --on-conflict ask prompt and both fzf pickers. What was missing is the way to get that same
+  behaviour from a terminal, so how a run will behave under cron can be rehearsed without faking a
+  pipe.
+
+can_prompt() is now the single question all three ask, and --on-conflict ask says "this run cannot
+  ask" rather than naming a missing terminal, which was only half the reason.
+
+Completes the interactivity rule in ~/dev/standards/cli-design.md for safekeep.
+
+
 ## v0.4.0 (2026-08-07)
 
 ### Chores
