@@ -1343,7 +1343,43 @@ def test_ask_needs_something_to_ask(tmp_path, source_tree):
     which on a restore is a hang holding an unfinished tree."""
     restore, _ = backup_and_restore(tmp_path, source_tree, '--all', '--on-conflict', 'ask')
     assert restore.returncode == 2
-    assert 'nothing is attached to ask' in plain(restore.stderr)
+    assert 'this run cannot ask' in plain(restore.stderr)
+
+
+def test_no_input_refuses_to_ask_even_on_a_terminal(tmp_path, source_tree):
+    """The point of --no-input: rehearse the non-interactive path from a terminal, without
+    having to fake a pipe to find out how the run would behave under cron."""
+    dest = tmp_path / 'dest'
+    target = tmp_path / 'target'
+    config_path = matrix_config(tmp_path, dest, source_tree)
+    assert run_safekeep('--config', str(config_path), 'backup').returncode == 0
+
+    primary, secondary = pty.openpty()
+    command = [
+        sys.executable,
+        '-m',
+        'safekeep',
+        '--config',
+        str(config_path),
+        '--no-input',
+        'restore',
+        '--to',
+        str(target),
+        '--all',
+        '--on-conflict',
+        'ask',
+    ]
+    process = subprocess.Popen(command, stdin=secondary, stdout=secondary, stderr=secondary, close_fds=True)
+    os.close(secondary)
+    output = b''
+    try:
+        while chunk := os.read(primary, 4096):
+            output += chunk
+    except OSError:
+        pass
+    assert process.wait(timeout=60) == 2
+    os.close(primary)
+    assert 'this run cannot ask' in plain(output.decode(errors='replace'))
 
 
 def answering(tmp_path, config_path, target, answers, *extra):

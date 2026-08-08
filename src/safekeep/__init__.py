@@ -1453,18 +1453,27 @@ def explain_empty_selection(manifest, date, args):
         print(f'  {cyan(date)} records nothing at all', file=sys.stderr)
 
 
+def can_prompt(args):
+    """Whether a question may be asked: --no-input never allows one, and otherwise
+    stdin has to be a terminal.
+
+    A prompt on a stdin that never closes leaves the caller with no output and no
+    exit code, so every interactive path in a restore asks this first."""
+    return not args.no_input and sys.stdin.isatty()
+
+
 def do_restore(config, config_path, args):
     dest = Path(config['back_up_to']).expanduser()
 
-    if args.on_conflict == 'ask' and not sys.stdin.isatty():
-        print(f'{red("safekeep:")} {cyan("--on-conflict ask")} has to be answered, and nothing is attached to ask', file=sys.stderr)
+    if args.on_conflict == 'ask' and not can_prompt(args):
+        print(f'{red("safekeep:")} {cyan("--on-conflict ask")} has to be answered, and this run cannot ask', file=sys.stderr)
         policies = ', '.join(cyan(policy) for policy in ('backup', 'skip', 'overwrite', 'newer'))
         print(f'  decide up front instead: {policies} — {cyan("backup")} is the default', file=sys.stderr)
         sys.exit(2)
 
     if args.from_date:
         date = args.from_date
-    elif sys.stdin.isatty() and not (args.all or args.source or args.tag):
+    elif can_prompt(args) and not (args.all or args.source or args.tag):
         require_fzf()
         date = pick_snapshot(dest, config_path.stem)
         if date is None:
@@ -1490,7 +1499,7 @@ def do_restore(config, config_path, args):
 
     groups = select_groups(manifest, args)
     if groups is None:
-        if not sys.stdin.isatty():
+        if not can_prompt(args):
             print(f'{red("safekeep:")} nothing selected — pass {cyan("--all")}, {cyan("--source")}, or {cyan("--tag")}', file=sys.stderr)
             for row in source_rows(manifest.get('groups', [])):
                 print(f'  {kinds_label(row["kinds"]):<20} {row["source"]}', file=sys.stderr)
@@ -1883,6 +1892,7 @@ def show_help():
 
     help_section('Options')
     help_row('-c, --config', '<name|path>', 'Config to use (default: auto-detect)')
+    help_row('--no-input', '', 'Never prompt; fail naming the flag that would have answered')
     help_row('-V, --version', '', 'Print the running version')
     help_row('-h, --help', '', 'Show this help')
     help_text(
@@ -2005,6 +2015,7 @@ def build_parser():
     parser.add_argument('-h', '--help', action='store_true', dest='show_help')
     parser.add_argument('-V', '--version', action='store_true', dest='show_version')
     parser.add_argument('-c', '--config')
+    parser.add_argument('--no-input', action='store_true')
     commands = parser.add_subparsers(dest='command', metavar='COMMAND')
 
     update_cmd = commands.add_parser('update', add_help=False)
