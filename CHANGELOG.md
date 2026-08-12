@@ -1,6 +1,39 @@
 # CHANGELOG
 
 
+## v0.5.1 (2026-08-12)
+
+### Bug Fixes
+
+- **config**: Expand $VARIABLES in a backed-up path
+  ([`2d55a0c`](https://github.com/datapointchris/safekeep/commit/2d55a0c0d444b8d4d2646b2228d604c6ec34d88b))
+
+A file whose location differs per machine is declared as a variable and set on each one, so the same
+  config text names the right file everywhere. Only expanduser ran, so such a path was read
+  literally and backed up nothing.
+
+dotfiles generates a safekeep block for a named machine, to be pasted on it. Its registry entry is
+  $REPOS_JSON: the generator cannot resolve another machine's registry and must not write its own
+  answer into that machine's config, so the variable has to survive into the file and be expanded
+  here.
+
+An unset variable stays literal and the path does not exist, which reports as a missing path.
+  Substituting a default would back up the wrong file and say nothing.
+
+### Build System
+
+- **precommit**: Resync to forge toolchain 14
+  ([`480c343`](https://github.com/datapointchris/safekeep/commit/480c34389af99ea93cd93306eb1552b1f1e21171))
+
+### Documentation
+
+- Cite the standards without a machine path
+  ([`e41b4a6`](https://github.com/datapointchris/safekeep/commit/e41b4a61e258a8d4b18c8e1fa191d3f81f47c274))
+
+The citation carried an absolute path from one machine's layout. What a reader needs is the file and
+  the section, and those do not move.
+
+
 ## v0.5.0 (2026-08-08)
 
 ### Chores
@@ -25,7 +58,7 @@ restore already refused to ask without a terminal, on all three of its interacti
 can_prompt() is now the single question all three ask, and --on-conflict ask says "this run cannot
   ask" rather than naming a missing terminal, which was only half the reason.
 
-Completes the interactivity rule in standards/cli-design.md for safekeep.
+Completes the interactivity rule in ~/dev/standards/cli-design.md for safekeep.
 
 
 ## v0.4.0 (2026-08-07)

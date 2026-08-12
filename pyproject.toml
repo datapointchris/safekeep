@@ -1,6 +1,6 @@
 [project]
 name = "safekeep"
-version = "0.5.0"
+version = "0.5.1"
 description = "Config-driven file preservation with self-describing dated snapshots"
 authors = [{ name = "Chris Birch", email = "datapointchris@gmail.com" }]
 license = "MIT"
