@@ -370,7 +370,13 @@ def normalize_entries(entries):
             print(f'{red("safekeep:")} "tags" must be a list of strings: {yellow(repr(entry))}', file=sys.stderr)
             print(f'  a single tag is still a list: {cyan(SINGLE_TAG_EXAMPLE)}', file=sys.stderr)
             sys.exit(1)
-        normalized.append((Path(entry['path']).expanduser(), list(tags)))
+        # $VARIABLES before ~, because a config may name a path it must not carry. A
+        # file whose location differs per machine is declared as a variable and set on
+        # each one, so the same config text backs up the right file everywhere — the
+        # generator emitting it has no business resolving another machine's answer.
+        # An unset variable stays literal and the path simply will not exist, which is
+        # reported as a missing path rather than passing silently.
+        normalized.append((Path(os.path.expandvars(entry['path'])).expanduser(), list(tags)))
     return normalized
 
 

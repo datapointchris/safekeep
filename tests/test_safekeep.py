@@ -288,6 +288,31 @@ def test_normalize_entries_reads_tables_with_optional_tags():
     assert entries[1] == (Path('/b'), ['windows'])
 
 
+def test_normalize_entries_expands_a_variable_in_the_path(monkeypatch):
+    """A file whose location differs per machine is declared as a variable and set on each
+    one, so the same config text backs up the right file everywhere. dotfiles generates a
+    block carrying $REPOS_JSON for exactly this reason — it cannot resolve another
+    machine's registry, and must not write its own answer into that machine's config."""
+    monkeypatch.setenv('REPOS_JSON', '/declared/repos.json')
+    entries = safekeep.normalize_entries([{'path': '$REPOS_JSON'}])
+    assert entries[0] == (Path('/declared/repos.json'), [])
+
+
+def test_normalize_entries_leaves_an_unset_variable_literal(monkeypatch):
+    """Which makes the path not exist, reported as a missing path rather than passing
+    silently. Substituting a default here would back up the wrong file and say nothing."""
+    monkeypatch.delenv('REPOS_JSON', raising=False)
+    entries = safekeep.normalize_entries([{'path': '$REPOS_JSON'}])
+    assert entries[0] == (Path('$REPOS_JSON'), [])
+
+
+def test_normalize_entries_expands_a_variable_before_the_tilde(monkeypatch):
+    """Order matters: a variable holding a ~-relative path has to expand to a real one."""
+    monkeypatch.setenv('REPOS_JSON', '~/declared/repos.json')
+    entries = safekeep.normalize_entries([{'path': '$REPOS_JSON'}])
+    assert entries[0] == (Path.home() / 'declared' / 'repos.json', [])
+
+
 def test_normalize_entries_rejects_a_table_without_path():
     with pytest.raises(SystemExit):
         safekeep.normalize_entries([{'tags': ['oops']}])
