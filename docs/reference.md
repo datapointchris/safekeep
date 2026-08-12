@@ -29,7 +29,7 @@ safekeep restore --to / --tag wip         # Restore everything tagged 'wip'
 ```
 
 Bare `safekeep` prints usage rather than picking an action, per the no-args-shows-help rule in
-`~/dev/standards/cli-design.md`. A tool that did work bare could not gain a second command without
+`standards/cli-design.md`. A tool that did work bare could not gain a second command without
 silently changing what the bare invocation means — and here that bare invocation was the one that
 wrote. Bare `safekeep config` does the same thing one level down: it names a resource without
 selecting a verb, so it prints the namespace's own help and exits 2 rather than guessing `show`.
@@ -73,7 +73,7 @@ path = "~/code/side-project"
 tags = ["wip"]
 ```
 
-**Every key states what safekeep will do, so the file reads as a description of the backup rather than a list of this program's variables.** That is the standard in `~/dev/standards/configuration.md`, and safekeep is its worked example.
+**Every key states what safekeep will do, so the file reads as a description of the backup rather than a list of this program's variables.** That is the standard in `standards/configuration.md`, and safekeep is its worked example.
 
 **TOML, not JSON, and the reason is `tomllib`.** safekeep takes no dependencies on the backup path because it has to run on a locked-down work machine where installing a package is a fight, and `tomllib` has been in the standard library since 3.11 while YAML has never had a stdlib parser and never will. Comments come free with that choice, and they are what turns the file into its own manual. YAML would additionally have been the wrong fit for a config full of glob patterns: an unquoted `*.pyc` is alias syntax rather than a string, and bare `~` is null.
 

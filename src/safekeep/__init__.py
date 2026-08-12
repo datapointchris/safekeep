@@ -53,7 +53,7 @@ from pytermstyle import red
 from pytermstyle import yellow
 
 # Keys are phrases that state what safekeep will do, so the file reads as a description of the
-# backup rather than a dump of this program's variables -- see ~/dev/standards/configuration.md.
+# backup rather than a dump of this program's variables -- see standards/configuration.md.
 REQUIRED_KEYS = {'back_up_to'}
 VALID_KEYS = {'back_up_to', 'back_up_paths', 'git', 'skip_names_matching', 'skip_files_over_mb'}
 # 'repos' names the subject of this block; every other key states what happens to it.
@@ -126,7 +126,7 @@ def tool_version() -> str:
         return 'unknown'
 
 
-# Notify-only, per ~/dev/standards/release.md. One check per 24h, one line to
+# Notify-only, per standards/release.md. One check per 24h, one line to
 # stderr, and `safekeep update` is the only thing that writes anything.
 UPDATE_CONFIG = Config(tool='safekeep', owner='datapointchris')
 
@@ -2054,7 +2054,7 @@ def build_parser():
 
     # 'config' is a namespace, not a command. A bare `config` that printed would occupy the
     # noun slot with a verb's job, leaving nowhere for `config init` to go -- see
-    # ~/dev/standards/cli-design.md, "A resource that could ever grow a second command is a
+    # standards/cli-design.md, "A resource that could ever grow a second command is a
     # namespace today".
     config = commands.add_parser('config', add_help=False)
     config.add_argument('-h', '--help', action='store_true', dest='show_help')

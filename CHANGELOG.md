@@ -25,7 +25,7 @@ restore already refused to ask without a terminal, on all three of its interacti
 can_prompt() is now the single question all three ask, and --on-conflict ask says "this run cannot
   ask" rather than naming a missing terminal, which was only half the reason.
 
-Completes the interactivity rule in ~/dev/standards/cli-design.md for safekeep.
+Completes the interactivity rule in standards/cli-design.md for safekeep.
 
 
 ## v0.4.0 (2026-08-07)
