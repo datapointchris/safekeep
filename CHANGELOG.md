@@ -1,6 +1,60 @@
 # CHANGELOG
 
 
+## v1.0.0 (2026-08-13)
+
+### Features
+
+- Run a backup under a verb, not bare
+  ([`8b220ec`](https://github.com/datapointchris/safekeep/commit/8b220ec3d672dfa643e3038a0ee2a5d7f4116dfe))
+
+Bare `safekeep backup` copied every configured path the moment it was typed, which made the
+  exploratory invocation the destructive one -- over a network drive, with no way to ask what it
+  would do short of remembering --dry-run. It is now `safekeep backup run`, and a bare `backup`
+  prints the screen that completes the command line.
+
+`snapshots` and `tags` take the same treatment: `snapshots list`, `snapshots show <date>`, `tags
+  list`, `tags show <name>`. Both were nouns in the verb slot, and `tags <name>` was a positional
+  where a `show` belonged.
+
+The two commands feeding fzf's preview panes were `snapshots show` with the name left off, hidden
+  because there was no noun to hang them on. Giving `snapshots` a verb slot gave them one, so
+  preview-snapshot and preview-source become `snapshots show <date> [--source PATH]` and the tree
+  has no undocumented command left in it.
+
+A resource that could ever grow a second command is a namespace today, and no node acts until a verb
+  selects it -- standards/cli-design.md.
+
+- **backup**: Label a snapshot with why it was taken
+  ([`0883788`](https://github.com/datapointchris/safekeep/commit/08837889e9c7f0bae0949eab00b15f256c312fd4))
+
+A date says when a snapshot was taken and nothing about why, which is the question being asked when
+  an older one is picked on purpose months later, during a rebuild, by someone who no longer
+  remembers the week.
+
+safekeep backup run --label 'before moving wsl instance'
+
+Free text, kept in the manifest so it survives without the config that produced it. safekeep never
+  reads it: snapshots list, snapshots show, the restore picker and the restore header display it,
+  and that is the whole of its behaviour. Tags select and a label explains, which is why they stay
+  two things.
+
+A later run the same day keeps the label already there. There is one snapshot per date, so the
+  routine backup after the risky thing merges into the snapshot taken before it, and erasing that
+  note would leave the snapshot that matters indistinguishable from every other. The key is written
+  only when the flag was typed, so an absent flag leaves it out and the ordinary manifest merge
+  preserves it with no special case. --label '' clears one deliberately.
+
+The manifest version does not move. It went to 2 for the git groups' file lists, which restore reads
+  and behaves differently for; nothing branches on a label, so a version gate would be a number no
+  reader checks. A snapshot taken before this has no key and renders without a column or a separator
+  where a note would have been.
+
+clip_to_terminal gates the row's clip on stdout being a terminal, for the reason status already
+  gives: clip falls back to 80 columns rather than declining, so a captured log would be truncated
+  to a width nothing asked for.
+
+
 ## v0.5.1 (2026-08-12)
 
 ### Bug Fixes
