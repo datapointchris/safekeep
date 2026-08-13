@@ -5,7 +5,7 @@ The full behaviour, and the reasoning behind it. `README.md` is the short versio
 This document moved here from the dotfiles repository in August 2026, when safekeep became its
 own project. The decisions it records were made while it lived there.
 
-Config-driven file preservation that rsync-copies files and directories to a destination as dated snapshots. Each snapshot carries a manifest describing what was collected, so a snapshot can be restored without the config that produced it. Zero external dependencies for backup — Python stdlib only. Restore shells out to fzf for interactive selection.
+Config-driven file preservation that rsync-copies files and directories to a destination as timestamped snapshots, one per run. Each snapshot carries a manifest describing what was collected, so a snapshot can be restored without the config that produced it. Zero external dependencies for backup — Python stdlib only. Restore shells out to fzf for interactive selection.
 
 Primary use case: backing up scattered config files, local scripts, and git-untracked WIP from a WSL work machine to a network drive for crash protection, and restoring them onto a rebuilt machine.
 
@@ -18,7 +18,7 @@ safekeep config init            # Write a starter config to ~/.config/safekeep/d
 safekeep config show            # Display the resolved config
 safekeep config edit            # Open it in $VISUAL/$EDITOR, then report what the edit did
 safekeep backup run --dry-run   # Preview what would be copied
-safekeep backup run             # Copy the configured paths into today's snapshot
+safekeep backup run             # Copy the configured paths into a new snapshot
 safekeep backup run --tag wip   # Copy only the entries tagged 'wip'
 
 safekeep snapshots list                   # What is at the destination
@@ -135,11 +135,11 @@ A config left behind as `.json` is named rather than reported as absent: `no con
 
 ## Destination Structure
 
-A dated subdirectory is created for each day's backup. Full directory structure is preserved from filesystem root, so the origin of every file is unambiguous and restore is a reverse rsync.
+A subdirectory is created per run, named for the second it started. Full directory structure is preserved from filesystem root, so the origin of every file is unambiguous and restore is a reverse rsync.
 
 ```text
 /mnt/h/backups/
-  2026-08-04/
+  2026-08-04T17-32-08/
     .safekeep-manifest.json
     home/chris/
       notes/meeting.md
@@ -147,11 +147,34 @@ A dated subdirectory is created for each day's backup. Full directory structure 
       code/project/scratch.py          (untracked, from git.repos)
     mnt/c/Users/chris/
       Documents/work-notes/report.docx
-  2026-08-01/
+  2026-08-04T09-11-40/
+    ...
+  2026-08-01T18-02-55/
     ...
 ```
 
-Path construction: `back_up_to / YYYY-MM-DD / absolute-path-from-root`
+Path construction: `back_up_to / YYYY-MM-DDTHH-MM-SS / absolute-path-from-root`
+
+**One snapshot per run, not per day, and the reason is a measured data-loss window.** A second run
+on a day used to rsync into the same directory, so a file created and then mangled between the two
+runs lost its good version — the morning copy was overwritten and no earlier snapshot held it,
+because the file had not existed when the earlier ones were taken. That is precisely the
+git-untracked work-in-progress safekeep exists for. Files that survived a previous day were never at
+risk: rsync writes a temp file and renames it over the target, which breaks the hard link and leaves
+the older snapshot's inode untouched.
+
+**The name holds no colon, which rules out strict ISO 8601.** NTFS forbids a colon in a filename and
+the primary destination is SMB, so `2026-08-13T17:04:32` cannot be written. The time is hyphenated
+rather than run together as `170432`, because a snapshot name is read far more often than typed.
+
+**A date still selects.** `--from 2026-08-13` resolves to the last run of that day, which is what a
+person asking for a date almost always means, and an exact name always wins over a prefix. Every
+command that resolves one reports the name it resolved to rather than what was typed, so a prefix
+that matched something unintended is visible in the answer.
+
+**Snapshots written before the time was added are still found.** They are named for a day alone, and
+they stay listable and restorable — that is the whole of what compatibility means here, since nothing
+about an older snapshot's contents differs.
 
 **Snapshots are never pruned.** Deciding how many backups to keep is not safekeep's job.
 
@@ -218,12 +241,9 @@ snapshot picker and the restore header, and that is the whole of its behaviour. 
 label explains, which is why they are two things: a tag is vocabulary the config owns and `--tag`
 consumes, and a label is prose about one particular day.
 
-**A later run the same day keeps the label already there.** There is one snapshot per date, so the
-routine backup that runs after the risky thing merges into the snapshot taken before it — and
-erasing that note would leave the snapshot that matters indistinguishable from every other. An
-explicit `--label` replaces, and `--label ''` clears. The mechanism is the manifest key's *presence*:
-`do_backup` writes it only when the flag was typed, so an absent flag leaves the key out and the
-ordinary manifest merge preserves the earlier value with no special case.
+**The note stays on the run it describes.** A snapshot is one run, so the routine backup that runs
+after the risky thing writes its own snapshot and cannot overwrite the label the earlier one wrote.
+This used to need a merge rule, back when a second run that day rewrote the same manifest.
 
 The manifest version does not move for this. It went to 2 for the git groups' file lists, which
 *restore* reads and behaves differently for; nothing branches on a label, so a version gate would be
@@ -231,7 +251,9 @@ a number no reader checks. Every snapshot taken before this existed has no `labe
 without one — the displays ask with `.get`, and there is no empty column or trailing separator left
 where a note would have been.
 
-**A narrowed run merges into the day's snapshot instead of replacing it.** Running `backup --tag secrets` after a full backup on the same day rewrites `.safekeep-manifest.json`, and rsync never deletes, so the files from the earlier run are still sitting in the snapshot. Dropping their groups would leave them on disk and unrestorable, since the manifest is the only record of what a snapshot holds. The merge keeps every group the run did not cover, overlays the modes and symlinks it recorded, and replaces the oversized-file verdicts only for the sources it actually walked.
+**A narrowed run writes a partial snapshot of its own.** `backup run --tag secrets` records the sources that tag covers and nothing else, and the fuller snapshot from earlier sits beside it untouched. This is the one behaviour that changed shape when snapshots became per-run rather than per-day: a narrowed run used to top up the day's snapshot, and now it does not. So the newest snapshot is not necessarily the most complete one. `snapshots list` shows a source count per row, which is where a one-source snapshot beside nine-source ones is visible, and `--from` is how a restore names the fuller one.
+
+`merge_manifest` still exists for the case two runs land inside the same second and therefore share a name. rsync never deletes, so writing a manifest that named only the second run's groups would leave the first run's files on disk and unrestorable — and the manifest is the only record of what a snapshot holds.
 
 ## Tags
 
@@ -309,7 +331,7 @@ If the snapshot's home differs from the restoring machine's, paths under it are 
 
 ## Key Behaviors
 
-**Idempotent**: Running twice on the same day updates the same dated directory. rsync transfers only changed files.
+**Every run is its own snapshot**: running twice produces two, and the second hard-links what did not change since the first. The previous snapshot is the previous *run*, which is what keeps a busy day cheap.
 
 **Fail fast**: If the destination doesn't exist or isn't writable, exit immediately.
 

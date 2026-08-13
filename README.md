@@ -1,6 +1,6 @@
 # safekeep
 
-Dated snapshots of the files no package manager will put back.
+Timestamped snapshots of the files no package manager will put back.
 
 Rsync-copies configured paths to a destination and writes a manifest into each snapshot recording
 what was collected, the source file modes, and which sources were symlinks. That manifest is what
@@ -10,9 +10,12 @@ where the config died with the machine.
 The primary destination is a network drive that cannot represent Unix modes. Recording them in the
 manifest is the whole point: the copy loses them, and the restore puts them back.
 
-Snapshots are never pruned, and they do not need to be: unchanged files are hard links into the
-previous snapshot, so each one costs only what changed while still browsing and restoring as a
-complete tree.
+Every run writes its own snapshot, named for the second it started. A file created and mangled
+between two runs on one day therefore keeps its good version, which a per-day snapshot lost by
+overwriting the only copy.
+
+Snapshots are never pruned. Unchanged files are hard links into the previous run, so each snapshot
+costs only what changed while still browsing and restoring as a complete tree.
 
 ## What it is for
 
@@ -23,7 +26,7 @@ were irreplaceable after they are gone.
 ## Using it
 
 ```bash
-safekeep backup run              # copy the configured paths into today's snapshot
+safekeep backup run              # copy the configured paths into a new snapshot
 safekeep backup run --tag work   # only the entries carrying that tag
 safekeep backup run --label 'before the wsl move'   # say why this one was taken
 safekeep snapshots list          # list what is at the destination

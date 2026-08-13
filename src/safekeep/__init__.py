@@ -1,6 +1,6 @@
-"""safekeep - Config-driven file preservation with self-describing dated snapshots.
+"""safekeep - Config-driven file preservation with self-describing timestamped snapshots.
 
-Rsync-copies files and directories to a destination as dated snapshots, and writes a
+Rsync-copies files and directories to a destination as one snapshot per run, and writes a
 manifest into each one recording what was collected, the source file modes, and which
 sources were symlinks. That manifest is what makes a snapshot restorable without the
 config that produced it -- the disaster-recovery case, where the config died with the
@@ -21,6 +21,7 @@ surface is not repeated here -- `safekeep --help` is the one copy of it.
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -97,6 +98,16 @@ DEFAULT_SKIP_NAMES = [
 CONFIG_DIR = Path.home() / '.config' / 'safekeep'
 
 SINGLE_TAG_EXAMPLE = 'tags = ["wsl"]'
+
+# One snapshot per run, named for the second it started. The date half is still a plain date, so
+# a --from that names a day still selects, and every snapshot written before this change is still
+# found by the same pattern.
+#
+# No colons, because the primary destination is SMB and NTFS forbids them in a filename. That
+# rules out strict ISO 8601, whose extended time separator is exactly what cannot be written --
+# so the time is hyphenated to stay readable rather than run together as HHMMSS.
+SNAPSHOT_FORMAT = '%Y-%m-%dT%H-%M-%S'
+SNAPSHOT_NAME = re.compile(r'\d{4}-\d{2}-\d{2}(T\d{2}-\d{2}-\d{2})?')
 
 MANIFEST_NAME = '.safekeep-manifest.json'
 # 2 added the per-file lists on the git-derived groups, which is what lets a restore say that
@@ -780,22 +791,35 @@ def read_manifest(snapshot_dir):
 
 
 def list_snapshots(dest):
-    """List dated snapshot directories at dest, newest first, paired with manifests."""
+    """List snapshot directories at dest, newest first, paired with manifests."""
     if not dest.exists():
         return []
-    dated = [d for d in dest.iterdir() if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-']
+    dated = [d for d in dest.iterdir() if d.is_dir() and SNAPSHOT_NAME.fullmatch(d.name)]
     return [(d, read_manifest(d)) for d in sorted(dated, key=lambda d: d.name, reverse=True)]
 
 
-def previous_snapshot(dest, date_dir):
+def resolve_snapshot(dest, wanted):
+    """The snapshot `wanted` names: that name exactly, or the newest run of a day it prefixes.
+
+    Nobody types 2026-08-13T17-04-32 from memory, and a date is what a person actually has -- so
+    a date resolves to the last run that day, which is what --from almost always means. Every
+    caller prints the name it resolved to rather than what was typed, because a prefix that
+    matched something unintended is only visible if the answer says which snapshot it picked.
+    """
+    snapshots = [d for d, _ in list_snapshots(dest)]
+    exact = [d for d in snapshots if d.name == wanted]
+    return exact[0] if exact else next((d for d in snapshots if d.name.startswith(wanted)), None)
+
+
+def previous_snapshot(dest, snapshot_name):
     """The newest snapshot to hard-link unchanged files against, or None on the first run.
 
-    Today's own directory is excluded: a second run on the same day adds to a snapshot in
-    progress, and linking a tree against itself is both meaningless and a way to lose the
-    freshly-copied version of a file that changed between the two runs.
+    This run's own directory is excluded. Its name carries a timestamp so it normally does not
+    exist yet, but two runs inside one second share a name -- and linking a tree against itself
+    is both meaningless and a way to lose the freshly-copied version of a file that changed.
     """
     for snapshot_dir, _ in list_snapshots(dest):
-        if snapshot_dir.name != date_dir:
+        if snapshot_dir.name != snapshot_name:
             return snapshot_dir
     return None
 
@@ -843,6 +867,15 @@ def file_kinds(manifest):
     return kinds
 
 
+def snapshot_name_width(snapshots):
+    """The widest snapshot name in a listing, so the columns after it line up.
+
+    A destination carries both name shapes at once: every snapshot taken before the time was
+    added is a bare date, ten characters against nineteen.
+    """
+    return max((len(snapshot_dir.name) for snapshot_dir, _ in snapshots), default=0)
+
+
 def show_snapshot_list(dest):
     snapshots = list_snapshots(dest)
     if not snapshots:
@@ -851,17 +884,22 @@ def show_snapshot_list(dest):
 
     print(f'{bold("safekeep:")} {len(snapshots)} snapshots at {cyan(str(dest))}')
     print()
+    # Padded across the listing rather than to a constant: a destination holds names of both
+    # shapes, since every snapshot taken before the time was added is a bare date. A shorter
+    # name left unpadded shifts every column on its row and the listing stops being scannable.
+    width = snapshot_name_width(snapshots)
     for snapshot_dir, manifest in snapshots:
+        name = f'{snapshot_dir.name:<{width}}'
         if manifest is None:
-            print(f'  {bold(snapshot_dir.name)}  {yellow("no manifest — not restorable by safekeep")}')
+            print(f'  {bold(name)}  {yellow("no manifest — not restorable by safekeep")}')
             continue
         groups = manifest.get('groups', [])
         total_bytes = sum(g.get('bytes', 0) for g in groups)
         total_files = sum(g.get('files', 0) for g in groups)
         host = manifest.get('hostname', '?')
         sources = len(source_rows(groups))
-        cells = f'{snapshot_dir.name}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {host}'
-        row = f'  {bold(snapshot_dir.name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}'
+        cells = f'{name}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {host}'
+        row = f'  {bold(name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}'
         # Free text of any length, so it goes last and is clipped against the columns before it:
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
         # one of them is not at the left. On a terminal only, for the reason `status` gives --
@@ -874,11 +912,15 @@ def show_snapshot_list(dest):
 
 def show_snapshot_record(dest, date):
     """What one snapshot holds, as the manifest records it — also the fzf preview pane."""
-    manifest = read_manifest(dest / date)
+    snapshot_dir = resolve_snapshot(dest, date)
+    if snapshot_dir is None:
+        print(f'no snapshot {date} at {dest}')
+        return
+    manifest = read_manifest(snapshot_dir)
     if manifest is None:
         print('no manifest — not restorable by safekeep')
         return
-    print(f'{date}   {manifest.get("hostname", "?")}   {manifest.get("created", "?")}')
+    print(f'{snapshot_dir.name}   {manifest.get("hostname", "?")}   {manifest.get("created", "?")}')
     print(f'config: {manifest.get("config_name", "?")}   home: {manifest.get("home", "?")}')
     if manifest.get('label'):
         print(f'label: {manifest["label"]}')
@@ -914,8 +956,9 @@ def snapshot_to_size_against(dest, date):
     snapshots = [(d, m) for d, m in list_snapshots(dest) if m is not None]
     if date is None:
         return snapshots[0] if snapshots else (None, None)
+    named = resolve_snapshot(dest, date)
     for snapshot_dir, manifest in snapshots:
-        if snapshot_dir.name == date:
+        if snapshot_dir == named:
             return snapshot_dir, manifest
     print(f'{red("safekeep:")} no restorable snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
     sys.exit(1)
@@ -1117,23 +1160,24 @@ def pick_snapshot(dest, config_name):
     # `-m safekeep` rather than this file's path: as a package, __file__ is
     # src/safekeep/__init__.py, and running that directly re-imports the module
     # under the name __main__ instead of resolving the installed package.
-    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {{1}}'
+    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {{2}}'
 
+    # One preformatted column block with the raw name hidden behind it, the same arrangement
+    # pick_sources uses: fzf renders a tab as a tab stop rather than aligning a column, and a
+    # destination holds names of two widths, so the shorter rows would step left.
+    width = snapshot_name_width(snapshots)
     lines = []
     for snapshot_dir, manifest in snapshots:
         groups = manifest.get('groups', [])
         total_bytes = sum(g.get('bytes', 0) for g in groups)
-        cells = [snapshot_dir.name, human_size(total_bytes), plural(len(source_rows(groups)), 'source')]
-        # A snapshot with no label contributes an empty field rather than a shorter row, so the
-        # field a selection is read out of stays at a fixed index whatever a snapshot carries.
-        cells.append(fzf_cell(manifest.get('label')))
-        lines.append('\t'.join(cells))
+        shown = f'{snapshot_dir.name:<{width}}  {human_size(total_bytes):>9}  {plural(len(source_rows(groups)), "source"):<10}'
+        lines.append(f'{shown}  {fzf_cell(manifest.get("label"))}'.rstrip() + f'\t{snapshot_dir.name}')
 
     selected = fzf(
         lines,
         [
             '--delimiter=\t',
-            '--with-nth=1,2,3,4',
+            '--with-nth=1',
             '--header=select a snapshot   ↑↓ move · enter choose · esc cancel',
             '--header-first',
             '--preview',
@@ -1143,7 +1187,8 @@ def pick_snapshot(dest, config_name):
     )
     if not selected:
         return None
-    return selected[0].split('\t')[0]
+    # Field 2, not the padded block in field 1 -- the name is what everything downstream opens.
+    return selected[0].split('\t')[1]
 
 
 def pick_sources(snapshot_dir, manifest, config_name):
@@ -1189,8 +1234,8 @@ PREVIEW_FILE_LIMIT = 200
 
 def show_snapshot_source_files(dest, date, source):
     """The files a snapshot holds for one source — also the fzf preview pane."""
-    snapshot_dir = dest / date
-    manifest = read_manifest(snapshot_dir)
+    snapshot_dir = resolve_snapshot(dest, date)
+    manifest = read_manifest(snapshot_dir) if snapshot_dir else None
     if manifest is None:
         print('no manifest — not restorable by safekeep')
         return
@@ -1574,10 +1619,13 @@ def do_restore(config, config_path, args):
             sys.exit(1)
         date = restorable[0].name
 
-    snapshot_dir = dest / date
-    if not snapshot_dir.exists():
+    snapshot_dir = resolve_snapshot(dest, date)
+    if snapshot_dir is None:
         print(f'{red("safekeep:")} no snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
         sys.exit(1)
+    # A --from naming a day resolves to the last run of it, so the rest of this reports the name
+    # that was resolved rather than the one that was typed.
+    date = snapshot_dir.name
 
     manifest = read_manifest(snapshot_dir)
     if manifest is None:
@@ -1706,10 +1754,13 @@ def require_known_selection(config, config_path, args):
 def merge_manifest(existing, manifest):
     """This run's manifest folded into the one already in the snapshot.
 
-    A run narrowed by --tag or --group still rewrites the manifest of a snapshot that may
-    already hold a full backup. rsync never deletes, so the files it did not touch are still
-    there -- dropping their groups would leave them on disk and unrestorable, which is the
-    exact failure the manifest exists to prevent.
+    Reached only when two runs land in the same second and therefore share a snapshot name. That
+    used to be every second run of a day, back when a snapshot was a day rather than a run.
+
+    It is kept rather than deleted because the failure it prevents is the worst one available:
+    rsync never deletes, so a second run's files land beside the first's, and writing a manifest
+    that names only the second run's groups would leave the rest on disk and unrestorable. The
+    manifest is the only record of what a snapshot holds.
 
     The scalar keys take this run's value by ordinary dict-merge, which is also what carries
     'label' correctly: do_backup writes that key only when --label was typed, so an absent flag
@@ -1752,9 +1803,9 @@ def do_backup(config, config_path, warnings, args):
         print(f'{red("safekeep:")} destination {yellow(str(dest))} is not writable', file=sys.stderr)
         sys.exit(1)
 
-    date_dir = datetime.now().strftime('%Y-%m-%d')
-    dest_base = dest / date_dir
-    link_dest = previous_snapshot(dest, date_dir)
+    snapshot_name = datetime.now().strftime(SNAPSHOT_FORMAT)
+    dest_base = dest / snapshot_name
+    link_dest = previous_snapshot(dest, snapshot_name)
 
     manifest = {
         'version': MANIFEST_VERSION,
@@ -1782,9 +1833,9 @@ def do_backup(config, config_path, warnings, args):
     }
 
     # Set only when the flag was typed, because the key's *presence* is what carries that fact
-    # through the merge below: a second run the same day writes into the same snapshot, and one
-    # without --label must not erase the note the earlier one wrote. `--label ''` is the way to
-    # clear it deliberately, which is why an empty string is stored as null rather than skipped.
+    # through the merge below, which two runs inside one second still reach. `--label ''` is a
+    # typed decision rather than an omission, which is why an empty string is stored as null
+    # rather than skipped.
     if args.label is not None:
         manifest['label'] = args.label.strip() or None
 
@@ -1998,7 +2049,7 @@ def show_help():
     )
 
     help_section('Commands')
-    help_row('safekeep backup run', '[--label <note>]', "Copy the configured paths into today's snapshot")
+    help_row('safekeep backup run', '[--label <note>]', 'Copy the configured paths into a new snapshot')
     help_row('safekeep snapshots list', '', 'List the snapshots at the destination')
     help_row('safekeep snapshots show', '<date>', 'What one snapshot holds')
     help_row('safekeep tags list', '', 'What each tag covers, and what it would restore')
@@ -2043,19 +2094,19 @@ def show_help():
 
 
 def show_backup_help():
-    help_header('safekeep backup', "Copy the configured paths into today's snapshot.")
+    help_header('safekeep backup', 'Copy the configured paths into a new snapshot.')
     help_usage('safekeep backup run [OPTIONS]')
 
     help_section('Commands')
-    help_row('safekeep backup run', '', "Copy the configured paths into today's snapshot")
+    help_row('safekeep backup run', '', 'Copy the configured paths into a new snapshot')
 
     help_section('Selection')
     help_text('  Everything the config lists, unless one of these narrows it:')
     help_row('--tag', '<name>', 'Only entries carrying NAME (repeatable)')
     help_row('--source', '<path>', 'Only entries whose path contains PATH (repeatable)')
     help_text(
-        "  A narrowed run merges into the day's snapshot rather than replacing it, so the",
-        '  sources it did not cover stay recorded and restorable.',
+        '  A narrowed run records only what it collected, so it writes a partial snapshot',
+        '  rather than topping up a fuller one. The full snapshot beside it is untouched.',
         '  safekeep tags list is what says which names there are to narrow by.',
     )
 
@@ -2066,9 +2117,8 @@ def show_backup_help():
     help_text(
         '  A label is free text and the tool never reads it — snapshots list, snapshots',
         '  show and the restore picker display it. A date says when a snapshot was taken',
-        "  and nothing about why, which is what a label answers. It is the day's snapshot",
-        '  that carries it, so a later run without --label keeps the note already there;',
-        "  --label '' is how one is cleared.",
+        '  and nothing about why, which is what a label answers. A snapshot is one run, so',
+        '  the note stays on the run it describes and a later backup cannot overwrite it.',
     )
 
     help_section('Examples')

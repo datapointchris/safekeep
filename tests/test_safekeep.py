@@ -151,7 +151,7 @@ def test_backup_help_documents_narrowing_a_run(tmp_path):
     result = run_safekeep('backup', '--help')
     assert result.returncode == 0
     assert '--tag' in result.stdout
-    assert 'merges' in result.stdout, 'a narrowed run rewrites a manifest, which needs saying'
+    assert 'partial snapshot' in result.stdout, 'a narrowed run records less than a full one, which needs saying'
 
 
 def test_restore_help_is_its_own_screen_not_the_root(tmp_path):
@@ -519,38 +519,61 @@ def test_backup_narrows_to_the_sources_a_tag_covers(tmp_path, source_tree):
     assert [group['source'] for group in manifest['groups']] == [str(source_tree / 'real.conf')]
 
 
-def test_a_narrowed_backup_keeps_the_groups_it_did_not_cover(tmp_path, source_tree):
-    """rsync never deletes, so the untouched files are still in the snapshot — dropping their
-    groups would leave them on disk and unrestorable, since the manifest is the only record."""
+def test_a_narrowed_backup_makes_a_partial_snapshot_of_its_own(tmp_path, source_tree):
+    """A snapshot is one run, so a narrowed run records what that run collected and nothing more.
+    It no longer tops up the day's snapshot, because there is no longer a day's snapshot to top
+    up — the full one from earlier sits beside it and is what a restore of the rest comes from."""
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', ['conf']))
     run_safekeep('--config', str(config_path), 'backup', 'run')
+    full = earlier_run_today(dest)
     run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'conf')
+    narrowed = latest_snapshot(dest)
 
-    snapshot = next(d for d in dest.iterdir() if d.is_dir())
-    manifest = json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
-    assert {group['source'] for group in manifest['groups']} == {str(source_tree / 'notes'), str(source_tree / 'real.conf')}
-    assert manifest['modes'], 'the modes recorded for the untouched group survive the merge too'
+    assert sources_of(full) == {str(source_tree / 'notes'), str(source_tree / 'real.conf')}
+    assert sources_of(narrowed) == {str(source_tree / 'real.conf')}
+    assert narrowed != full
 
     target = tmp_path / 'target'
-    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--tag', 'docs')
+    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--from', full.name, '--tag', 'docs')
     assert restore.returncode == 0, restore.stderr
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
 
 
-def labelled_snapshot(tmp_path, dest, source_tree, *runs):
-    """Back up once per entry in `runs`, each a --label argument list, and read the manifest."""
+def test_a_same_second_rerun_merges_rather_than_dropping_groups():
+    """Two runs inside one second share a name, which is the only case merge_manifest still
+    covers. rsync never deletes, so a manifest naming only the second run's groups would leave
+    the first run's files on disk and unrestorable — and the manifest is the only record."""
+    existing = {
+        'groups': [{'kind': 'path', 'source': '/a', 'tags': [], 'files': 1, 'bytes': 1}],
+        'modes': {'a': '0600'},
+        'symlinks': {},
+        'skipped_large': [],
+        'label': 'written by the first run',
+    }
+    incoming = {
+        'groups': [{'kind': 'path', 'source': '/b', 'tags': [], 'files': 1, 'bytes': 1}],
+        'modes': {},
+        'symlinks': {},
+        'skipped_large': [],
+    }
+    merged = safekeep.merge_manifest(existing, incoming)
+    assert {group['source'] for group in merged['groups']} == {'/a', '/b'}
+    assert merged['modes'] == {'a': '0600'}, 'the untouched group keeps the modes recorded for it'
+    assert merged['label'] == 'written by the first run', 'an absent --label leaves the key out'
+
+
+def labelled_snapshot(tmp_path, dest, source_tree, *extra):
+    """Back up once with `extra` appended, and read the manifest it wrote."""
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    for extra in runs:
-        result = run_safekeep('--config', str(config_path), 'backup', 'run', *extra)
-        assert result.returncode == 0, result.stderr
-    snapshot = next(d for d in dest.iterdir() if d.is_dir())
-    return config_path, json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
+    result = run_safekeep('--config', str(config_path), 'backup', 'run', *extra)
+    assert result.returncode == 0, result.stderr
+    return config_path, json.loads((latest_snapshot(dest) / safekeep.MANIFEST_NAME).read_text())
 
 
 def test_a_label_says_why_the_backup_was_taken(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before moving wsl instance'])
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
     assert manifest['label'] == 'before moving wsl instance'
 
 
@@ -558,39 +581,36 @@ def test_a_backup_without_a_label_records_none(tmp_path, source_tree):
     """Absent rather than empty: nothing reads the key, so a snapshot that was never labelled
     should not claim a field it has no answer for."""
     dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, [])
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree)
     assert 'label' not in manifest
 
 
-def test_a_later_run_that_day_keeps_the_label_already_there(tmp_path, source_tree):
-    """One snapshot per date, so a routine run merges into the one taken before the risky
-    thing. It must not erase the note that run wrote."""
+def test_an_empty_label_records_none(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before the wsl move'], [])
-    assert manifest['label'] == 'before the wsl move'
-
-
-def test_a_later_run_that_day_can_replace_the_label(tmp_path, source_tree):
-    dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'first'], ['--label', 'second'])
-    assert manifest['label'] == 'second'
-
-
-def test_an_empty_label_clears_the_one_already_there(tmp_path, source_tree):
-    """The flag was typed, so it is a decision rather than an omission — and it is the only way
-    to take a note back off a snapshot."""
-    dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'wrong'], ['--label', ''])
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, '--label', '')
     assert manifest['label'] is None
 
 
-def test_a_backup_reports_the_label_the_snapshot_ends_up_with(tmp_path, source_tree):
-    """Read off the merged manifest, not off the flag, so a run that passed none still says
-    which note today's snapshot is carrying."""
+def test_each_run_that_day_carries_its_own_label(tmp_path, source_tree):
+    """A snapshot is one run, so the note stays attached to the run it describes. The routine
+    backup after the risky thing cannot overwrite the note the risky one wrote, because it is
+    not writing into the same snapshot at all."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     run_safekeep('--config', str(config_path), 'backup', 'run', '--label', 'before the wsl move')
-    result = run_safekeep('--config', str(config_path), 'backup', 'run')
+    before = earlier_run_today(dest)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    routine = latest_snapshot(dest)
+
+    assert routine != before
+    assert json.loads((before / safekeep.MANIFEST_NAME).read_text())['label'] == 'before the wsl move'
+    assert 'label' not in json.loads((routine / safekeep.MANIFEST_NAME).read_text())
+
+
+def test_a_backup_reports_the_label_it_recorded(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    result = run_safekeep('--config', str(config_path), 'backup', 'run', '--label', 'before the wsl move')
     assert 'before the wsl move' in plain(result.stdout)
 
 
@@ -736,17 +756,42 @@ def test_backup_does_not_prune_old_snapshots(tmp_path, source_tree):
     assert (dest / '2020-01-03').exists()
 
 
-def age_todays_snapshot(dest, to_date='2020-01-01'):
+def latest_snapshot(dest):
+    return max((d for d in dest.iterdir() if d.is_dir()), key=lambda d: d.name)
+
+
+def rename_latest_snapshot(dest, to_name):
     """Rename the snapshot just written so the next run sees it as the previous one.
 
-    do_backup names the directory from datetime.now(), so a second snapshot cannot be produced
-    within a test any other way. Renaming exercises the real lookup rather than a stub, because
-    previous_snapshot only ever reads directory names.
+    do_backup names the directory for the second the run started, and this suite writes two
+    backups well inside one second — so two distinct snapshots cannot be produced any other way.
+    A sleep would be slower and still a race. Renaming exercises the real lookup rather than a
+    stub, because previous_snapshot and resolve_snapshot only ever read directory names.
     """
-    today = next(d for d in dest.iterdir() if d.is_dir())
-    aged = dest / to_date
-    today.rename(aged)
-    return aged
+    moved = dest / to_name
+    latest_snapshot(dest).rename(moved)
+    return moved
+
+
+def age_todays_snapshot(dest, to_date='2020-01-01'):
+    """Move the snapshot just written onto an earlier day."""
+    return rename_latest_snapshot(dest, to_date)
+
+
+def earlier_run_today(dest, at='00-00-00'):
+    """Move the snapshot just written to an earlier time on its own day.
+
+    The day comes off the existing name rather than the clock, so the test does not race a
+    midnight rollover it has no reason to care about. The default is midnight because the time
+    has to be earlier than whatever hour the suite actually runs at, and a fixed 09-00-00 is
+    only earlier on a machine whose clock is past nine.
+    """
+    return rename_latest_snapshot(dest, f'{latest_snapshot(dest).name[:10]}T{at}')
+
+
+def sources_of(snapshot_dir):
+    manifest = json.loads((snapshot_dir / safekeep.MANIFEST_NAME).read_text())
+    return {group['source'] for group in manifest['groups']}
 
 
 def snapshot_copy_of(snapshot_dir, source_file):
@@ -832,19 +877,26 @@ def test_a_snapshot_says_whether_it_shares_storage(tmp_path, source_tree):
     assert f'shares inodes with {previous.name}' in shown
 
 
-def test_a_second_run_the_same_day_does_not_link_against_itself(tmp_path, source_tree):
-    """Linking a snapshot in progress against itself would pin the version it is replacing."""
+def test_a_second_run_the_same_day_links_against_the_first(tmp_path, source_tree):
+    """The previous snapshot is the previous run, not the previous day. That is what keeps a
+    second backup on a busy day cheap, and it is the version the earlier run cannot lose:
+    the morning's copy stays in the morning's snapshot with its own content."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    plain = source_tree / 'notes' / 'plain.md'
+    plain_md = source_tree / 'notes' / 'plain.md'
+    secret = source_tree / 'notes' / 'secret.txt'
 
     run_safekeep('--config', str(config_path), 'backup', 'run')
-    today = next(d for d in dest.iterdir() if d.is_dir())
-    plain.write_text('same day edit\n')
+    morning = earlier_run_today(dest)
+    plain_md.write_text('afternoon edit\n')
     run_safekeep('--config', str(config_path), 'backup', 'run')
+    afternoon = latest_snapshot(dest)
 
-    assert json.loads((today / safekeep.MANIFEST_NAME).read_text())['linked_from'] is None
-    assert snapshot_copy_of(today, plain).read_text() == 'same day edit\n'
+    assert json.loads((afternoon / safekeep.MANIFEST_NAME).read_text())['linked_from'] == morning.name
+    assert snapshot_copy_of(morning, plain_md).read_text() == 'plain\n', 'the morning version survives'
+    assert snapshot_copy_of(afternoon, plain_md).read_text() == 'afternoon edit\n'
+    # Untouched files cost a link rather than a copy, which is what makes per-run snapshots cheap.
+    assert snapshot_copy_of(afternoon, secret).stat().st_ino == snapshot_copy_of(morning, secret).stat().st_ino
 
 
 def git(*args: str, cwd: Path) -> None:
@@ -891,6 +943,118 @@ def test_git_untracked_becomes_its_own_group(tmp_path):
 # --- snapshots ------------------------------------------------------------------------
 
 
+def test_a_snapshot_is_named_for_the_run_not_the_day(tmp_path, source_tree):
+    """A file written and mangled between two runs on one day used to lose its good version,
+    because the second run overwrote the only copy. One snapshot per run is what keeps it."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    wip = source_tree / 'notes' / 'wip.md'
+
+    wip.write_text('GOOD\n')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    morning = earlier_run_today(dest)
+
+    wip.write_text('MANGLED\n')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+
+    assert snapshot_copy_of(morning, wip).read_text() == 'GOOD\n'
+    assert snapshot_copy_of(latest_snapshot(dest), wip).read_text() == 'MANGLED\n'
+
+
+def test_the_snapshot_name_carries_a_time_and_holds_no_colon(tmp_path, source_tree):
+    """NTFS forbids a colon in a filename and the primary destination is SMB, which rules out
+    strict ISO 8601 — its extended time separator is exactly what cannot be written."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    name = latest_snapshot(dest).name
+    assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', name), name
+    assert ':' not in name
+
+
+def test_snapshots_written_before_the_time_was_added_are_still_found(tmp_path, source_tree):
+    """Every snapshot already on a destination is named for a day alone. They stay listable and
+    restorable, which is the whole of what back-compat means here."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    old = age_todays_snapshot(dest, '2020-01-01')
+
+    listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
+    assert '2020-01-01' in listed
+
+    target = tmp_path / 'target'
+    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--from', old.name, '--all')
+    assert restore.returncode == 0, restore.stderr
+    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
+
+
+def test_a_listing_of_both_name_shapes_keeps_its_columns(tmp_path, source_tree):
+    """A destination carries both at once — every snapshot taken before the time was added is a
+    bare date, ten characters against nineteen. Unpadded, the short row shifts every column."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    shutil.copytree(latest_snapshot(dest), dest / '2020-01-01')
+
+    rows = [r for r in plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout).splitlines() if 'files' in r]
+    assert len(rows) == 2
+    assert len({row.index('files') for row in rows}) == 1, rows
+    """Nobody types a full timestamp from memory, and a date is what a person has. It resolves
+    to the last run of the day, and every caller reports the name it resolved to."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    morning = earlier_run_today(dest)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    afternoon = latest_snapshot(dest)
+    day = afternoon.name[:10]
+
+    result = run_safekeep('--config', str(config_path), 'restore', '--to', str(tmp_path / 't'), '--from', day, '--all')
+    assert result.returncode == 0, result.stderr
+    assert afternoon.name in plain(result.stdout)
+    assert morning.name not in plain(result.stdout)
+
+    shown = plain(run_safekeep('--config', str(config_path), 'snapshots', 'show', day).stdout)
+    assert shown.startswith(afternoon.name)
+
+
+def test_the_snapshot_picker_hides_a_typeable_name_behind_its_columns(tmp_path, source_tree, monkeypatch):
+    """fzf renders a tab as a tab stop rather than aligning a column, so the visible half is one
+    preformatted block and the name rides in field 2. Everything downstream opens that field, and
+    a padded block is not a path — which is exactly what broke when the layout last changed."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    wanted = latest_snapshot(dest).name
+    shutil.copytree(dest / wanted, dest / '2020-01-01')
+
+    captured = {}
+
+    def fake_fzf(lines, args):
+        captured.update(lines=lines, args=args)
+        return [lines[0]]
+
+    monkeypatch.setattr(safekeep, 'fzf', fake_fzf)
+    assert safekeep.pick_snapshot(dest, config_path.stem) == wanted
+
+    shown = [line.split('\t')[0] for line in captured['lines']]
+    assert len({block.index('source') for block in shown}) == 1, shown
+    preview = captured['args'][captured['args'].index('--preview') + 1]
+    assert preview.endswith('{2}'), 'the preview pane opens the name, not the padded block'
+
+
+def test_an_exact_name_beats_a_prefix(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    morning = earlier_run_today(dest)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+
+    shown = plain(run_safekeep('--config', str(config_path), 'snapshots', 'show', morning.name).stdout)
+    assert shown.startswith(morning.name)
+
+
 def test_list_snapshots_is_newest_first(tmp_path):
     dest = tmp_path / 'dest'
     for name in ('2026-01-01', '2026-03-03', '2026-02-02'):
@@ -909,7 +1073,7 @@ def test_snapshots_flags_manifestless_directories(tmp_path):
 
 def test_both_snapshot_views_show_the_label(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before moving wsl instance'])
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
     date = next(d for d in dest.iterdir() if d.is_dir()).name
 
     listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
@@ -924,7 +1088,7 @@ def test_a_snapshot_without_a_label_renders_clean(tmp_path, source_tree):
     """The degradation case, and the one every snapshot taken before this existed lands in:
     no trailing separator, no empty column, nothing claiming a note that was never written."""
     dest = tmp_path / 'dest'
-    config_path, manifest = labelled_snapshot(tmp_path, dest, source_tree, [])
+    config_path, manifest = labelled_snapshot(tmp_path, dest, source_tree)
     assert 'label' not in manifest
     date = next(d for d in dest.iterdir() if d.is_dir()).name
 
@@ -942,7 +1106,7 @@ def test_a_long_label_survives_a_redirect_whole(tmp_path, source_tree):
     falls back to 80 columns rather than declining, so an unguarded call would truncate a
     captured log to a width nothing asked for."""
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', LONG_LABEL])
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', LONG_LABEL)
     listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
     assert LONG_LABEL in listed
     assert '…' not in listed
@@ -952,7 +1116,7 @@ def test_a_long_label_is_clipped_on_a_terminal(tmp_path, source_tree):
     """The other half of the gate above: on a terminal there is a width to fit, and a row that
     wraps is two rows — which is what stops a column of dates being scannable."""
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', LONG_LABEL])
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', LONG_LABEL)
 
     primary, secondary = pty.openpty()
     command = [sys.executable, '-m', 'safekeep', '--config', str(config_path), 'snapshots', 'list']
@@ -976,7 +1140,7 @@ def test_a_restore_names_the_label_of_the_snapshot_it_reads(tmp_path, source_tre
     """A date says when a snapshot was taken and nothing about why, which is the question being
     answered when an older one is picked on purpose."""
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before moving wsl instance'])
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
     result = run_safekeep('--config', str(config_path), 'restore', '--to', str(tmp_path / 'target'), '--all')
     assert result.returncode == 0, result.stderr
     assert 'before moving wsl instance' in plain(result.stdout)
