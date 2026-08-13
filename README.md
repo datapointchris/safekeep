@@ -25,6 +25,7 @@ were irreplaceable after they are gone.
 ```bash
 safekeep backup run              # copy the configured paths into today's snapshot
 safekeep backup run --tag work   # only the entries carrying that tag
+safekeep backup run --label 'before the wsl move'   # say why this one was taken
 safekeep snapshots list          # list what is at the destination
 safekeep tags list               # what each tag covers, and what it would restore
 safekeep restore --to ./here     # restore sources from a snapshot

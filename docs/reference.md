@@ -169,7 +169,7 @@ anything, and never edit inside the destination. Restore only ever reads, so it 
 
 ## The Manifest
 
-`.safekeep-manifest.json` is written into each snapshot and is what makes it restorable on a machine that no longer has the config. It records the groups collected (kind, source, tags, counts, sizes), the source `home` for remapping, file modes, symlink origins, oversized files that were skipped, and any config warnings.
+`.safekeep-manifest.json` is written into each snapshot and is what makes it restorable on a machine that no longer has the config. It records the groups collected (kind, source, tags, counts, sizes), the source `home` for remapping, file modes, symlink origins, oversized files that were skipped, any config warnings, and the `label` if one was given.
 
 **A group is a (kind, source) pair, and it is not the unit anything is restored in.** A repo contributes a `git_untracked` group and a `git_ignored` group over one subtree, which restore rsyncs once — so the picker, the counters and the summary all speak in *sources*, and a repo is one row carrying `untracked + ignored`. The manifest keeps the two groups because their file sets are disjoint and each carries its own list; nothing above the manifest has a reason to.
 
@@ -187,11 +187,40 @@ A snapshot with no manifest cannot be restored by safekeep — it says so and po
 safekeep backup run                     # everything the config lists
 safekeep backup run --tag secrets       # only the entries carrying that tag
 safekeep backup run --source ~/notes    # only the entries whose path contains that string
+safekeep backup run --label 'before the wsl move'   # say why this one was taken
 ```
 
 **Bare `backup` means everything, so `--tag` and `--source` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
 
 A tag or path that matches nothing in the config is a usage error rather than a run that copies nothing, because a backup covering nothing reads exactly like one that covered everything it was asked to — the summary only reports what was copied.
+
+### Labels
+
+`--label` writes a free-text note into the snapshot saying why the backup was taken. A date says
+*when*, and nothing about *why* — which is exactly the question being asked when an older snapshot is
+picked on purpose months later, during a rebuild, by someone who no longer remembers the week.
+
+```bash
+safekeep backup run --label 'before moving wsl instance'
+```
+
+**safekeep never reads a label.** It is displayed by `snapshots list`, `snapshots show`, the restore
+snapshot picker and the restore header, and that is the whole of its behaviour. Tags select and a
+label explains, which is why they are two things: a tag is vocabulary the config owns and `--tag`
+consumes, and a label is prose about one particular day.
+
+**A later run the same day keeps the label already there.** There is one snapshot per date, so the
+routine backup that runs after the risky thing merges into the snapshot taken before it — and
+erasing that note would leave the snapshot that matters indistinguishable from every other. An
+explicit `--label` replaces, and `--label ''` clears. The mechanism is the manifest key's *presence*:
+`do_backup` writes it only when the flag was typed, so an absent flag leaves the key out and the
+ordinary manifest merge preserves the earlier value with no special case.
+
+The manifest version does not move for this. It went to 2 for the git groups' file lists, which
+*restore* reads and behaves differently for; nothing branches on a label, so a version gate would be
+a number no reader checks. Every snapshot taken before this existed has no `label` key and renders
+without one — the displays ask with `.get`, and there is no empty column or trailing separator left
+where a note would have been.
 
 **A narrowed run merges into the day's snapshot instead of replacing it.** Running `backup --tag secrets` after a full backup on the same day rewrites `.safekeep-manifest.json`, and rsync never deletes, so the files from the earlier run are still sitting in the snapshot. Dropping their groups would leave them on disk and unrestorable, since the manifest is the only record of what a snapshot holds. The merge keeps every group the run did not cover, overlays the modes and symlinks it recorded, and replaces the oversized-file verdicts only for the sources it actually walked.
 

@@ -245,6 +245,16 @@ def clear_status():
         print('\r\033[K', end='', flush=True)
 
 
+def clip_to_terminal(text, used):
+    """`text` shortened to the room left on a terminal line, and untouched off a terminal.
+
+    Redirected output has no width to fit, and clip falls back to 80 columns rather than
+    declining -- so an unguarded call truncates a captured log to a width nothing asked for.
+    Same reasoning as `status` above: a redirection keeps the report and loses only the fit.
+    """
+    return clip(text, used) if sys.stdout.isatty() else text
+
+
 def warn_about_json_configs():
     """Name the leftover JSON configs, since 'no configs found' is a bewildering way to
     report a format change to someone whose config file is sitting right there."""
@@ -813,7 +823,16 @@ def show_snapshot_list(dest):
         total_files = sum(g.get('files', 0) for g in groups)
         host = manifest.get('hostname', '?')
         sources = len(source_rows(groups))
-        print(f'  {bold(snapshot_dir.name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}')
+        cells = f'{snapshot_dir.name}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {host}'
+        row = f'  {bold(snapshot_dir.name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}'
+        # Free text of any length, so it goes last and is clipped against the columns before it:
+        # a row that wraps is two rows, and a column of dates stops being scannable the moment
+        # one of them is not at the left. On a terminal only, for the reason `status` gives --
+        # a redirected run has no width to fit and loses data if one is assumed. clip measures
+        # uncolored text, which is what `cells` is for.
+        if manifest.get('label'):
+            row += '  ' + green(clip_to_terminal(manifest['label'], len(cells) + 4))
+        print(row)
 
 
 def show_snapshot_record(dest, date):
@@ -824,6 +843,8 @@ def show_snapshot_record(dest, date):
         return
     print(f'{date}   {manifest.get("hostname", "?")}   {manifest.get("created", "?")}')
     print(f'config: {manifest.get("config_name", "?")}   home: {manifest.get("home", "?")}')
+    if manifest.get('label'):
+        print(f'label: {manifest["label"]}')
     print()
     for row in source_rows(manifest.get('groups', [])):
         tags = ' '.join(row['tags'])
@@ -1028,6 +1049,15 @@ def require_fzf():
     sys.exit(1)
 
 
+def fzf_cell(text):
+    """Free text flattened to one tab-free field.
+
+    A picker row is split on tabs, so a label holding one would shift every field after it and
+    a selection would be read out of the wrong column. Newlines would split the row outright.
+    """
+    return ' '.join(text.split()) if text else ''
+
+
 def fzf(lines, args):
     """Run fzf over lines, returning the selected ones."""
     result = subprocess.run(['fzf', *args], input='\n'.join(lines), capture_output=True, text=True)
@@ -1052,13 +1082,17 @@ def pick_snapshot(dest, config_name):
     for snapshot_dir, manifest in snapshots:
         groups = manifest.get('groups', [])
         total_bytes = sum(g.get('bytes', 0) for g in groups)
-        lines.append(f'{snapshot_dir.name}\t{human_size(total_bytes)}\t{plural(len(source_rows(groups)), "source")}')
+        cells = [snapshot_dir.name, human_size(total_bytes), plural(len(source_rows(groups)), 'source')]
+        # A snapshot with no label contributes an empty field rather than a shorter row, so the
+        # field a selection is read out of stays at a fixed index whatever a snapshot carries.
+        cells.append(fzf_cell(manifest.get('label')))
+        lines.append('\t'.join(cells))
 
     selected = fzf(
         lines,
         [
             '--delimiter=\t',
-            '--with-nth=1,2,3',
+            '--with-nth=1,2,3,4',
             '--header=select a snapshot   ↑↓ move · enter choose · esc cancel',
             '--header-first',
             '--preview',
@@ -1537,8 +1571,12 @@ def do_restore(config, config_path, args):
     symlinks = manifest.get('symlinks', {})
     kinds = file_kinds(manifest)
 
-    label = yellow('would restore') if args.dry_run else green('restoring')
-    print(f'{bold("safekeep:")} {label} {bold(plural(len(rows), "source"))} from {cyan(date)} to {cyan(args.to)}')
+    verb = yellow('would restore') if args.dry_run else green('restoring')
+    print(f'{bold("safekeep:")} {verb} {bold(plural(len(rows), "source"))} from {cyan(date)} to {cyan(args.to)}')
+    # A date says when a snapshot was taken and nothing about why, which is the question being
+    # answered when an older one is picked on purpose.
+    if manifest.get('label'):
+        print(f'  labelled {green(manifest["label"])}')
     if manifest_home and manifest_home != target_home:
         print(f'  remapping {cyan(manifest_home)} -> {cyan(target_home)}')
     if args.on_conflict in ('backup', 'overwrite', 'ask') and not args.dry_run:
@@ -1570,9 +1608,9 @@ def do_restore(config, config_path, args):
 
     if entries:
         changed, recorded = apply_modes(manifest, entries, args.dry_run)
-        label = yellow('would set') if args.dry_run else green('set')
+        verb = yellow('would set') if args.dry_run else green('set')
         detail = f' ({plural(recorded, "recorded deviation")})' if recorded else ''
-        print(f'\n  {label} modes on {bold(plural(changed, "path"))}{detail}')
+        print(f'\n  {verb} modes on {bold(plural(changed, "path"))}{detail}')
 
     restored_symlinks = paths_under_any(restored, ['/' + rel for rel in symlinks])
     if restored_symlinks and not args.skip_symlinked:
@@ -1583,8 +1621,8 @@ def do_restore(config, config_path, args):
             print(f'  ... and {len(restored_symlinks) - 10} more')
         print(f'  remove them and run {cyan("dotfiles link")} to restore the symlinks, or use {cyan("--skip-symlinked")} next time')
 
-    label = yellow('would restore') if args.dry_run else green('restored')
-    print(f'\n{bold("safekeep:")} {label} {bold(plural(len(restored), "source"))} to {cyan(args.to)}')
+    verb = yellow('would restore') if args.dry_run else green('restored')
+    print(f'\n{bold("safekeep:")} {verb} {bold(plural(len(restored), "source"))} to {cyan(args.to)}')
 
 
 def select_sources(entries, args):
@@ -1631,6 +1669,10 @@ def merge_manifest(existing, manifest):
     already hold a full backup. rsync never deletes, so the files it did not touch are still
     there -- dropping their groups would leave them on disk and unrestorable, which is the
     exact failure the manifest exists to prevent.
+
+    The scalar keys take this run's value by ordinary dict-merge, which is also what carries
+    'label' correctly: do_backup writes that key only when --label was typed, so an absent flag
+    leaves it out and the earlier note survives with no special case here.
     """
     if existing is None:
         return manifest
@@ -1699,6 +1741,13 @@ def do_backup(config, config_path, warnings, args):
         'skipped_large': [],
     }
 
+    # Set only when the flag was typed, because the key's *presence* is what carries that fact
+    # through the merge below: a second run the same day writes into the same snapshot, and one
+    # without --label must not erase the note the earlier one wrote. `--label ''` is the way to
+    # clear it deliberately, which is why an empty string is stored as null rather than skipped.
+    if args.label is not None:
+        manifest['label'] = args.label.strip() or None
+
     entries = select_sources(normalize_entries(config.get('back_up_paths', [])), args)
     if entries:
         print(f'\n{bold("paths:")}')
@@ -1714,8 +1763,8 @@ def do_backup(config, config_path, warnings, args):
             )
             present.append(path)
         rsync_paths(present, dest_base, excludes, args.dry_run, max_size_mb, link_dest)
-        label = yellow('would copy') if args.dry_run else green('copied')
-        print(f'  {label} {bold(plural(len(present), "path"))}')
+        verb = yellow('would copy') if args.dry_run else green('copied')
+        print(f'  {verb} {bold(plural(len(present), "path"))}')
 
     repos, back_up_untracked, ignored_patterns = repo_entries(config)
     repos = select_sources(repos, args)
@@ -1744,8 +1793,8 @@ def do_backup(config, config_path, warnings, args):
                 }
             )
             rsync_untracked(copyable, dest_base, args.dry_run, link_dest)
-            label = yellow('would copy') if args.dry_run else green('copied')
-            print(f'  {label} {bold(plural(survey["files"], "untracked file"))} from {cyan(str(repo_path))}')
+            verb = yellow('would copy') if args.dry_run else green('copied')
+            print(f'  {verb} {bold(plural(survey["files"], "untracked file"))} from {cyan(str(repo_path))}')
 
     if ignored_patterns and repos:
         print(f'\n{bold("git_ignored:")}')
@@ -1770,12 +1819,13 @@ def do_backup(config, config_path, warnings, args):
                 }
             )
             rsync_untracked(copyable, dest_base, args.dry_run, link_dest)
-            label = yellow('would copy') if args.dry_run else green('copied')
-            print(f'  {label} {bold(plural(survey["files"], "ignored file"))} from {cyan(str(repo_path))}')
+            verb = yellow('would copy') if args.dry_run else green('copied')
+            print(f'  {verb} {bold(plural(survey["files"], "ignored file"))} from {cyan(str(repo_path))}')
 
     total_files = sum(g['files'] for g in manifest['groups'])
     total_bytes = sum(g['bytes'] for g in manifest['groups'])
 
+    written = manifest
     if not args.dry_run:
         dest_base.mkdir(parents=True, exist_ok=True)
         written = merge_manifest(read_manifest(dest_base), manifest)
@@ -1791,9 +1841,14 @@ def do_backup(config, config_path, warnings, args):
 
     elapsed = time.monotonic() - start_time
     elapsed_str = f'{elapsed:.0f}s' if elapsed < 60 else f'{elapsed / 60:.1f}m'
-    label = yellow('would back up') if args.dry_run else green('backed up')
+    verb = yellow('would back up') if args.dry_run else green('backed up')
     summary = f'{bold(plural(total_files, "file"))} ({bold(human_size(total_bytes))})'
-    print(f'\n{bold("safekeep:")} {label} {summary} to {cyan(str(dest_base))} in {bold(elapsed_str)}')
+    print(f'\n{bold("safekeep:")} {verb} {summary} to {cyan(str(dest_base))} in {bold(elapsed_str)}')
+
+    # Read back off the merged manifest rather than off args, so a run that passed no --label
+    # still reports the label an earlier run today left on this snapshot.
+    if written.get('label'):
+        print(f'  labelled {green(written["label"])}')
 
 
 def init_config(name):
@@ -1964,14 +2019,23 @@ def show_backup_help():
     )
 
     help_section('Options')
+    help_row('--label', '<note>', 'Why this backup was taken, kept in the snapshot')
     help_row('-n, --dry-run', '', 'Show what would be copied, write nothing')
     help_row('-h, --help', '', 'Show this help')
+    help_text(
+        '  A label is free text and the tool never reads it — snapshots list, snapshots',
+        '  show and the restore picker display it. A date says when a snapshot was taken',
+        "  and nothing about why, which is what a label answers. It is the day's snapshot",
+        '  that carries it, so a later run without --label keeps the note already there;',
+        "  --label '' is how one is cleared.",
+    )
 
     help_section('Examples')
     help_row('safekeep backup run', '', 'Everything the config lists')
     help_row('safekeep backup run -n', '', 'What a backup would copy, before it copies it')
     help_row('safekeep backup run --tag secrets', '', 'Just the secrets, before doing something risky')
     help_row('safekeep backup run --source ~/notes', '', 'One path, without walking the rest')
+    help_row("safekeep backup run --label 'before the wsl move'", '', 'Say why, for whoever restores it')
 
     help_end()
 

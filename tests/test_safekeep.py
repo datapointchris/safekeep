@@ -538,6 +538,70 @@ def test_a_narrowed_backup_keeps_the_groups_it_did_not_cover(tmp_path, source_tr
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
 
 
+def labelled_snapshot(tmp_path, dest, source_tree, *runs):
+    """Back up once per entry in `runs`, each a --label argument list, and read the manifest."""
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    for extra in runs:
+        result = run_safekeep('--config', str(config_path), 'backup', 'run', *extra)
+        assert result.returncode == 0, result.stderr
+    snapshot = next(d for d in dest.iterdir() if d.is_dir())
+    return config_path, json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
+
+
+def test_a_label_says_why_the_backup_was_taken(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before moving wsl instance'])
+    assert manifest['label'] == 'before moving wsl instance'
+
+
+def test_a_backup_without_a_label_records_none(tmp_path, source_tree):
+    """Absent rather than empty: nothing reads the key, so a snapshot that was never labelled
+    should not claim a field it has no answer for."""
+    dest = tmp_path / 'dest'
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, [])
+    assert 'label' not in manifest
+
+
+def test_a_later_run_that_day_keeps_the_label_already_there(tmp_path, source_tree):
+    """One snapshot per date, so a routine run merges into the one taken before the risky
+    thing. It must not erase the note that run wrote."""
+    dest = tmp_path / 'dest'
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before the wsl move'], [])
+    assert manifest['label'] == 'before the wsl move'
+
+
+def test_a_later_run_that_day_can_replace_the_label(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'first'], ['--label', 'second'])
+    assert manifest['label'] == 'second'
+
+
+def test_an_empty_label_clears_the_one_already_there(tmp_path, source_tree):
+    """The flag was typed, so it is a decision rather than an omission — and it is the only way
+    to take a note back off a snapshot."""
+    dest = tmp_path / 'dest'
+    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'wrong'], ['--label', ''])
+    assert manifest['label'] is None
+
+
+def test_a_backup_reports_the_label_the_snapshot_ends_up_with(tmp_path, source_tree):
+    """Read off the merged manifest, not off the flag, so a run that passed none still says
+    which note today's snapshot is carrying."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--label', 'before the wsl move')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run')
+    assert 'before the wsl move' in plain(result.stdout)
+
+
+def test_a_dry_run_records_no_label(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    result = run_safekeep('--config', str(config_path), 'backup', 'run', '-n', '--label', 'never written')
+    assert result.returncode == 0
+    assert not any(dest.iterdir()), 'a dry run creates the destination base and no snapshot in it'
+
+
 def test_backup_by_unknown_tag_is_a_usage_error(tmp_path, source_tree):
     """Backing up nothing reads exactly like backing up everything asked for, so a typo has to
     fail rather than succeed at covering nothing."""
@@ -806,6 +870,89 @@ def test_snapshots_flags_manifestless_directories(tmp_path):
     config_path = write_config(tmp_path, dest)
     result = run_safekeep('--config', str(config_path), 'snapshots', 'list')
     assert 'no manifest' in result.stdout
+
+
+def test_both_snapshot_views_show_the_label(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before moving wsl instance'])
+    date = next(d for d in dest.iterdir() if d.is_dir()).name
+
+    listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
+    assert 'before moving wsl instance' in listed
+    assert date in listed.splitlines()[-1], 'the label goes after the columns, never onto its own row'
+
+    shown = plain(run_safekeep('--config', str(config_path), 'snapshots', 'show', date).stdout)
+    assert 'before moving wsl instance' in shown
+
+
+def test_a_snapshot_without_a_label_renders_clean(tmp_path, source_tree):
+    """The degradation case, and the one every snapshot taken before this existed lands in:
+    no trailing separator, no empty column, nothing claiming a note that was never written."""
+    dest = tmp_path / 'dest'
+    config_path, manifest = labelled_snapshot(tmp_path, dest, source_tree, [])
+    assert 'label' not in manifest
+    date = next(d for d in dest.iterdir() if d.is_dir()).name
+
+    row = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout).splitlines()[-1]
+    assert row == row.rstrip()
+    assert row.endswith(os.uname().nodename)
+    assert 'label' not in plain(run_safekeep('--config', str(config_path), 'snapshots', 'show', date).stdout)
+
+
+LONG_LABEL = 'before moving the wsl instance to the new machine, ' + 'x' * 120
+
+
+def test_a_long_label_survives_a_redirect_whole(tmp_path, source_tree):
+    """The row is clipped to fit a terminal, and a redirected run has no width to fit — clip
+    falls back to 80 columns rather than declining, so an unguarded call would truncate a
+    captured log to a width nothing asked for."""
+    dest = tmp_path / 'dest'
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', LONG_LABEL])
+    listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
+    assert LONG_LABEL in listed
+    assert '…' not in listed
+
+
+def test_a_long_label_is_clipped_on_a_terminal(tmp_path, source_tree):
+    """The other half of the gate above: on a terminal there is a width to fit, and a row that
+    wraps is two rows — which is what stops a column of dates being scannable."""
+    dest = tmp_path / 'dest'
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', LONG_LABEL])
+
+    primary, secondary = pty.openpty()
+    command = [sys.executable, '-m', 'safekeep', '--config', str(config_path), 'snapshots', 'list']
+    process = subprocess.Popen(command, stdin=secondary, stdout=secondary, stderr=secondary, close_fds=True)
+    os.close(secondary)
+    output = b''
+    try:
+        while chunk := os.read(primary, 4096):
+            output += chunk
+    except OSError:
+        pass
+    process.wait()
+    os.close(primary)
+
+    row = next(line for line in plain(output.decode()).splitlines() if '2026' in line or 'x' in line)
+    assert '…' in row
+    assert LONG_LABEL not in row
+
+
+def test_a_restore_names_the_label_of_the_snapshot_it_reads(tmp_path, source_tree):
+    """A date says when a snapshot was taken and nothing about why, which is the question being
+    answered when an older one is picked on purpose."""
+    dest = tmp_path / 'dest'
+    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, ['--label', 'before moving wsl instance'])
+    result = run_safekeep('--config', str(config_path), 'restore', '--to', str(tmp_path / 'target'), '--all')
+    assert result.returncode == 0, result.stderr
+    assert 'before moving wsl instance' in plain(result.stdout)
+
+
+def test_a_label_reaching_the_picker_holds_no_tab(tmp_path):
+    """Picker rows are split on tabs, so a label carrying one would shift every field after it
+    and a selection would be read out of the wrong column."""
+    assert safekeep.fzf_cell('before\tthe\nwsl  move') == 'before the wsl move'
+    assert safekeep.fzf_cell(None) == ''
+    assert safekeep.fzf_cell('') == ''
 
 
 # --- tags -----------------------------------------------------------------------------
