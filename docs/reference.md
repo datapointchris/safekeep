@@ -12,38 +12,51 @@ Primary use case: backing up scattered config files, local scripts, and git-untr
 ## Quick Start
 
 ```bash
-safekeep                    # Usage. Nothing writes without an explicit verb
-safekeep config example     # Read the annotated example without writing anything
-safekeep config init        # Write a starter config to ~/.config/safekeep/default.toml
-safekeep config show        # Display the resolved config
-safekeep config edit        # Open it in $VISUAL/$EDITOR, then report what the edit did
-safekeep backup --dry-run   # Preview what would be copied
-safekeep backup             # Copy the configured paths into today's snapshot
-safekeep backup --tag wip   # Copy only the entries tagged 'wip'
+safekeep                        # Usage. Nothing writes without an explicit verb
+safekeep config example         # Read the annotated example without writing anything
+safekeep config init            # Write a starter config to ~/.config/safekeep/default.toml
+safekeep config show            # Display the resolved config
+safekeep config edit            # Open it in $VISUAL/$EDITOR, then report what the edit did
+safekeep backup run --dry-run   # Preview what would be copied
+safekeep backup run             # Copy the configured paths into today's snapshot
+safekeep backup run --tag wip   # Copy only the entries tagged 'wip'
 
-safekeep snapshots                        # What is at the destination
-safekeep tags                             # Which tags exist, and what each would restore
-safekeep tags wip                         # The sources one tag covers
+safekeep snapshots list                   # What is at the destination
+safekeep snapshots show 2026-08-13        # What one snapshot holds
+safekeep tags list                        # Which tags exist, and what each would restore
+safekeep tags show wip                    # The sources one tag covers
 safekeep restore --to /tmp/restore-test   # Rehearse: pick a snapshot and sources
 safekeep restore --to / --tag wip         # Restore everything tagged 'wip'
 ```
 
-Bare `safekeep` prints usage rather than picking an action, per the no-args-shows-help rule in
-`standards/cli-design.md`. A tool that did work bare could not gain a second command without
-silently changing what the bare invocation means — and here that bare invocation was the one that
-wrote. Bare `safekeep config` does the same thing one level down: it names a resource without
-selecting a verb, so it prints the namespace's own help and exits 2 rather than guessing `show`.
+**The verb comes last, and no node acts until one selects it.** That is the no-args-shows-help rule
+in `standards/cli-design.md`, and it holds at every level: bare `safekeep`, bare `safekeep backup`
+and bare `safekeep config` each print the screen that completes the command line and exit 2. Walking
+the tree one token at a time is therefore a way to read it rather than a way to trigger it.
 
-**`config` is a namespace even though it started with one command.** It was previously a root-level
-`init` plus a bare `config` that printed — which meant `config` occupied the noun slot while doing a
-verb's job, leaving nowhere for `config init` to go. The rules are in `cli-design.md`: a resource
-that could ever grow a second command is a namespace today, and `init` belongs to whatever it
-initializes. `git init` creates the tool's entire subject; a config file is one artifact among
-several, which is why it nests here and in `go mod init`.
+**`backup` is a namespace and `run` is the verb that writes.** Bare `backup` used to copy every
+configured path the moment it was typed, which made the exploratory invocation the destructive one —
+over a network drive, with no way to ask what it would do short of remembering `--dry-run`. It is
+also the arrangement the rule exists to prevent for a second reason: a command that acts bare cannot
+gain a sibling without silently changing what the bare form means, and everyone who typed it out of
+habit then runs something else.
+
+**`snapshots` and `tags` are namespaces for the same reason, and the change paid for itself
+immediately.** `tags wip` was a positional where a `show` belonged, and the two commands feeding
+fzf's preview panes — `preview-snapshot` and `preview-source` — were `snapshots show` with the name
+left off, hidden because there was no noun to hang them on. Giving `snapshots` a verb slot gave them
+one, so the tree now has no undocumented command in it at all.
+
+**`config` was the first of them and is the model.** It was previously a root-level `init` plus a
+bare `config` that printed — which meant `config` occupied the noun slot while doing a verb's job,
+leaving nowhere for `config init` to go. The rules are in `cli-design.md`: a resource that could ever
+grow a second command is a namespace today, and `init` belongs to whatever it initializes. `git init`
+creates the tool's entire subject; a config file is one artifact among several, which is why it nests
+here and in `go mod init`.
 
 ## Config
 
-Config files live at `~/.config/safekeep/<name>.toml`. If only one config exists, it auto-loads. With multiple configs, specify which one with `--config`, which is global and goes before the command: `safekeep --config work backup`.
+Config files live at `~/.config/safekeep/<name>.toml`. If only one config exists, it auto-loads. With multiple configs, specify which one with `--config`, which is global and goes before the command: `safekeep --config work backup run`.
 
 `safekeep config init` writes a complete annotated starter config, and `safekeep config example` prints the same content to stdout without touching the filesystem — which is what you want when the question is "what does that key look like" rather than "set me up". The shape it produces:
 
@@ -171,9 +184,9 @@ A snapshot with no manifest cannot be restored by safekeep — it says so and po
 ## Backup
 
 ```bash
-safekeep backup                     # everything the config lists
-safekeep backup --tag secrets       # only the entries carrying that tag
-safekeep backup --source ~/notes    # only the entries whose path contains that string
+safekeep backup run                     # everything the config lists
+safekeep backup run --tag secrets       # only the entries carrying that tag
+safekeep backup run --source ~/notes    # only the entries whose path contains that string
 ```
 
 **Bare `backup` means everything, so `--tag` and `--source` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
@@ -185,12 +198,12 @@ A tag or path that matches nothing in the config is a usage error rather than a 
 ## Tags
 
 ```bash
-safekeep tags               # every tag, the sources it covers, what it would restore
-safekeep tags secrets       # one tag, source by source, and the restore that brings it back
-safekeep tags --from DATE   # size against an older snapshot instead of the newest
+safekeep tags list               # every tag, the sources it covers, what it would restore
+safekeep tags show secrets       # one tag, source by source, and the restore that brings it back
+safekeep tags list --from DATE   # size against an older snapshot instead of the newest
 ```
 
-**A tag lives in two places, and reading either one alone is misleading.** The config says which entries carry it; the manifest inside each snapshot carries a copy of what the config said *on the day that snapshot was taken*. `restore --tag` selects on the manifest, so tagging an entry today does nothing for the snapshots that already exist. `safekeep tags` reads both sides and marks the disagreements: a tag whose sources are not in the snapshot yet shows `not in this snapshot`, and a tag the config has since dropped or renamed is still listed, because it remains the only name the older snapshots answer to.
+**A tag lives in two places, and reading either one alone is misleading.** The config says which entries carry it; the manifest inside each snapshot carries a copy of what the config said *on the day that snapshot was taken*. `restore --tag` selects on the manifest, so tagging an entry today does nothing for the snapshots that already exist. `safekeep tags list` reads both sides and marks the disagreements: a tag whose sources are not in the snapshot yet shows `not in this snapshot`, and a tag the config has since dropped or renamed is still listed, because it remains the only name the older snapshots answer to.
 
 That disagreement is the whole reason the command exists. Without it, `restore --to / --tag wsl` reporting `nothing selected` looks like a bug in the tool rather than a snapshot taken before the tag was written.
 

@@ -796,7 +796,7 @@ def file_kinds(manifest):
     return kinds
 
 
-def show_snapshots(dest):
+def show_snapshot_list(dest):
     snapshots = list_snapshots(dest)
     if not snapshots:
         print(f'{yellow("safekeep:")} no snapshots at {cyan(str(dest))}')
@@ -816,8 +816,8 @@ def show_snapshots(dest):
         print(f'  {bold(snapshot_dir.name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}')
 
 
-def preview_snapshot(dest, date):
-    """Render a snapshot summary for the fzf preview pane."""
+def show_snapshot_record(dest, date):
+    """What one snapshot holds, as the manifest records it — also the fzf preview pane."""
     manifest = read_manifest(dest / date)
     if manifest is None:
         print('no manifest — not restorable by safekeep')
@@ -943,15 +943,20 @@ def print_tag_sources(config_path, dest, snapshot_dir):
         print(f'  in {cyan(config_path.name)}, sized against snapshot {cyan(snapshot_dir.name)}')
 
 
-def show_tags(config, config_path, args):
-    """List the tags a restore can select on, and what each would bring back."""
+def resolve_tag_index(config, args):
+    """The tag index, and the two things a listing has to name beside it.
+
+    Both verbs read the config and one snapshot together, and both report which snapshot they
+    sized against — so the resolution is here rather than duplicated in each.
+    """
     dest = Path(config['back_up_to']).expanduser()
     snapshot_dir, manifest = snapshot_to_size_against(dest, args.from_date)
-    index = tag_index(config, snapshot_sources(manifest))
+    return tag_index(config, snapshot_sources(manifest)), dest, snapshot_dir
 
-    if args.name:
-        show_tag(args.name, index, config_path, dest, snapshot_dir, args.from_date)
-        return
+
+def show_tag_list(config, config_path, args):
+    """List the tags a restore can select on, and what each would bring back."""
+    index, dest, snapshot_dir = resolve_tag_index(config, args)
 
     print(f'{bold("safekeep:")} {plural(len(index), "tag")}')
     print_tag_sources(config_path, dest, snapshot_dir)
@@ -980,11 +985,13 @@ def show_tags(config, config_path, args):
     untagged = [path for _, path, tags in config_entries(config) if not tags]
     if untagged:
         print(f'\n  untagged: {plural(len(untagged), "source")} — only {cyan("--all")} or {cyan("--source")} reaches them')
-    print(f'\n  {cyan(f"safekeep tags {sorted(index)[0]}")}  what one tag covers')
+    print(f'\n  {cyan(f"safekeep tags show {sorted(index)[0]}")}  what one tag covers')
 
 
-def show_tag(name, index, config_path, dest, snapshot_dir, date):
+def show_tag(config, config_path, args):
     """Show the sources one tag covers, and the restore that would bring them back."""
+    index, dest, snapshot_dir = resolve_tag_index(config, args)
+    name = args.name
     rows = index.get(name)
     if not rows:
         print(f'{red("safekeep:")} no tag {yellow(name)} in {cyan(config_path.name)}', file=sys.stderr)
@@ -1009,7 +1016,7 @@ def show_tag(name, index, config_path, dest, snapshot_dir, date):
     if len([row for row in rows if row['files'] is not None]) > 1:
         print(f'  {"":<9} {"":<{width}}  {bold(sized_total(rows))}')
 
-    from_flag = f' --from {date}' if date else ''
+    from_flag = f' --from {args.from_date}' if args.from_date else ''
     print(f'\n  restore it: {cyan(f"safekeep restore --to /tmp/rehearsal{from_flag} --tag {name}")}')
 
 
@@ -1039,7 +1046,7 @@ def pick_snapshot(dest, config_name):
     # `-m safekeep` rather than this file's path: as a package, __file__ is
     # src/safekeep/__init__.py, and running that directly re-imports the module
     # under the name __main__ instead of resolving the installed package.
-    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} preview-snapshot {{1}}'
+    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {{1}}'
 
     lines = []
     for snapshot_dir, manifest in snapshots:
@@ -1081,7 +1088,7 @@ def pick_sources(snapshot_dir, manifest, config_name):
         for row in rows
     ]
 
-    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} preview-source {snapshot_dir.name} {{2}}'
+    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {snapshot_dir.name} --source {{2}}'
     selected = fzf(
         lines,
         [
@@ -1105,8 +1112,8 @@ def pick_sources(snapshot_dir, manifest, config_name):
 PREVIEW_FILE_LIMIT = 200
 
 
-def preview_source(dest, date, source):
-    """Render the files a snapshot holds for one source, for the fzf preview pane."""
+def show_snapshot_source_files(dest, date, source):
+    """The files a snapshot holds for one source — also the fzf preview pane."""
     snapshot_dir = dest / date
     manifest = read_manifest(snapshot_dir)
     if manifest is None:
@@ -1450,7 +1457,7 @@ def explain_empty_selection(manifest, date, args):
         available = sorted({tag for group in groups for tag in group.get('tags', [])})
         print(f'  no source in {cyan(date)} carries {yellow(", ".join(args.tag))}', file=sys.stderr)
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
-        print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags")} compares the two', file=sys.stderr)
+        print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags list")} compares the two', file=sys.stderr)
     if args.source:
         print(f'  no source in {cyan(date)} contains {yellow(", ".join(args.source))}:', file=sys.stderr)
         for row in source_rows(groups):
@@ -1886,12 +1893,20 @@ def show_config(config_path, config, warnings):
 
 def show_help():
     help_header('safekeep', 'Dated snapshots of the files no package manager will put back.')
-    help_usage('safekeep <command> [OPTIONS]')
+    help_usage('safekeep <resource> <verb> [OPTIONS]')
+
+    help_text(
+        '  The verb comes last, so a backup → snapshots → restore loop over one',
+        '  destination changes only the final word. Nothing acts until a verb',
+        '  selects it: every partial command prints the screen that completes it.',
+    )
 
     help_section('Commands')
-    help_row('safekeep backup', '[--tag <name>]', "Copy the configured paths into today's snapshot")
-    help_row('safekeep snapshots', '', 'List the snapshots at the destination')
-    help_row('safekeep tags', '[name]', 'What each tag covers, and what it would restore')
+    help_row('safekeep backup run', '[--label <note>]', "Copy the configured paths into today's snapshot")
+    help_row('safekeep snapshots list', '', 'List the snapshots at the destination')
+    help_row('safekeep snapshots show', '<date>', 'What one snapshot holds')
+    help_row('safekeep tags list', '', 'What each tag covers, and what it would restore')
+    help_row('safekeep tags show', '<name>', 'The sources one tag covers')
     help_row('safekeep restore', '--to <path>', 'Restore sources from a snapshot')
     help_row('safekeep config', '<verb>', 'Inspect and create config files')
     help_row('safekeep update', '', 'Install the newest release')
@@ -1902,8 +1917,8 @@ def show_help():
     help_row('-V, --version', '', 'Print the running version')
     help_row('-h, --help', '', 'Show this help')
     help_text(
-        '  Both go before the command: safekeep -c work backup',
-        '  -n, --dry-run goes after it, on backup and restore: safekeep backup -n',
+        '  Both go before the command: safekeep -c work backup run',
+        '  -n, --dry-run goes after it, on backup run and restore: safekeep backup run -n',
     )
 
     help_section('Config')
@@ -1917,15 +1932,15 @@ def show_help():
         '  Selection is always explicit — a restore never guesses at --all.',
         '  Rehearse into a scratch directory before restoring over anything real:',
         '      safekeep restore --to /tmp/restore-test --all',
-        '  A snapshot carries the tags its config had that day, so `safekeep tags`',
+        '  A snapshot carries the tags its config had that day, so `safekeep tags list`',
         '  is what says whether --tag will select anything in it.',
     )
 
     help_section('Examples')
     help_row('safekeep config init', '', 'Write ~/.config/safekeep/default.toml')
-    help_row('safekeep backup -n', '', 'See what a backup would copy')
-    help_row('safekeep snapshots', '', 'What is on the destination already')
-    help_row('safekeep tags secrets', '', 'What that tag would bring back')
+    help_row('safekeep backup run -n', '', 'See what a backup would copy')
+    help_row('safekeep snapshots list', '', 'What is on the destination already')
+    help_row('safekeep tags show secrets', '', 'What that tag would bring back')
     help_row('safekeep restore --to / --tag secrets', '', 'Restore one tag for real')
 
     help_end()
@@ -1933,7 +1948,10 @@ def show_help():
 
 def show_backup_help():
     help_header('safekeep backup', "Copy the configured paths into today's snapshot.")
-    help_usage('safekeep backup [OPTIONS]')
+    help_usage('safekeep backup run [OPTIONS]')
+
+    help_section('Commands')
+    help_row('safekeep backup run', '', "Copy the configured paths into today's snapshot")
 
     help_section('Selection')
     help_text('  Everything the config lists, unless one of these narrows it:')
@@ -1942,7 +1960,7 @@ def show_backup_help():
     help_text(
         "  A narrowed run merges into the day's snapshot rather than replacing it, so the",
         '  sources it did not cover stay recorded and restorable.',
-        '  safekeep tags is what says which names there are to narrow by.',
+        '  safekeep tags list is what says which names there are to narrow by.',
     )
 
     help_section('Options')
@@ -1950,10 +1968,60 @@ def show_backup_help():
     help_row('-h, --help', '', 'Show this help')
 
     help_section('Examples')
-    help_row('safekeep backup', '', 'Everything the config lists')
-    help_row('safekeep backup -n', '', 'What a backup would copy, before it copies it')
-    help_row('safekeep backup --tag secrets', '', 'Just the secrets, before doing something risky')
-    help_row('safekeep backup --source ~/notes', '', 'One path, without walking the rest')
+    help_row('safekeep backup run', '', 'Everything the config lists')
+    help_row('safekeep backup run -n', '', 'What a backup would copy, before it copies it')
+    help_row('safekeep backup run --tag secrets', '', 'Just the secrets, before doing something risky')
+    help_row('safekeep backup run --source ~/notes', '', 'One path, without walking the rest')
+
+    help_end()
+
+
+def show_snapshots_help():
+    help_header('safekeep snapshots', 'What is at the destination, and what each snapshot holds.')
+    help_usage('safekeep snapshots <verb>')
+
+    help_section('Commands')
+    help_row('safekeep snapshots list', '', 'Every snapshot at the destination, newest first')
+    help_row('safekeep snapshots show', '<date>', 'One snapshot: its sources, sizes and tags')
+
+    help_section('Options')
+    help_row('--source', '<path>', 'On show: the files that snapshot holds for one source')
+    help_row('-h, --help', '', 'Show this help')
+    help_text(
+        '  A snapshot with no manifest is listed and says so — safekeep cannot restore',
+        '  it, and the reason belongs on the row rather than in a later failure.',
+    )
+
+    help_section('Examples')
+    help_row('safekeep snapshots list', '', 'What is on the destination already')
+    help_row('safekeep snapshots show 2026-08-13', '', 'What that day captured')
+    help_row('safekeep snapshots show 2026-08-13 --source ~/notes', '', 'The files it holds for one source')
+
+    help_end()
+
+
+def show_tags_help():
+    help_header('safekeep tags', 'The tags a restore can select on, and what each would bring back.')
+    help_usage('safekeep tags <verb>')
+
+    help_section('Commands')
+    help_row('safekeep tags list', '', 'Every tag, the sources it covers, what it would restore')
+    help_row('safekeep tags show', '<name>', 'One tag, source by source, and the restore for it')
+
+    help_section('Options')
+    help_row('--from', '<date>', 'Size against that snapshot instead of the newest')
+    help_row('-h, --help', '', 'Show this help')
+    help_text(
+        '  A tag lives in two places and reading either alone misleads: the config says',
+        '  which entries carry it, and each snapshot carries a copy of what the config',
+        '  said that day. --tag selects on the snapshot, so tagging an entry today does',
+        '  nothing for the snapshots that already exist. Both verbs mark the difference.',
+    )
+
+    help_section('Examples')
+    help_row('safekeep tags list', '', 'Every tag and what it would restore')
+    help_row('safekeep tags show secrets', '', 'What that tag would bring back')
+    help_row('safekeep tags list --from 2026-07-01', '', 'Size against an older snapshot')
 
     help_end()
 
@@ -1970,7 +2038,7 @@ def show_restore_help():
     help_text(
         "  A source is one config entry — a path, or one repo's untracked and ignored files.",
         '  A tag selects on the snapshot, which carries the tags its config had that day.',
-        '  `safekeep tags <name>` is what says whether this one selects anything.',
+        '  `safekeep tags show <name>` is what says whether this one selects anything.',
     )
 
     help_section('Options')
@@ -2027,22 +2095,44 @@ def build_parser():
     update_cmd = commands.add_parser('update', add_help=False)
     update_cmd.add_argument('-h', '--help', action='store_true', dest='show_help')
 
+    # 'backup' is a namespace and 'run' is the verb that writes. A bare `backup` used to copy
+    # every configured path the moment it was typed, so walking the tree one token at a time
+    # fired a backup over the network -- see standards/cli-design.md, "No args shows help".
     backup = commands.add_parser('backup', add_help=False)
     backup.add_argument('-h', '--help', action='store_true', dest='show_help')
-    backup.add_argument('--tag', action='append', default=[], metavar='NAME')
+    backup_commands = backup.add_subparsers(dest='backup_command', metavar='COMMAND')
+    backup_run = backup_commands.add_parser('run', add_help=False)
+    backup_run.add_argument('-h', '--help', action='store_true', dest='show_help')
+    backup_run.add_argument('--tag', action='append', default=[], metavar='NAME')
     # --group is the name this had before "group" turned out to mean nothing to anyone reading
     # the output. Kept as an alias rather than retired: it is one word in a shell history, and
     # nothing about accepting it can make a backup cover less than it was asked to.
-    backup.add_argument('--source', '--group', dest='source', action='append', default=[], metavar='PATH')
-    backup.add_argument('-n', '--dry-run', action='store_true')
+    backup_run.add_argument('--source', '--group', dest='source', action='append', default=[], metavar='PATH')
+    backup_run.add_argument('--label', metavar='NOTE')
+    backup_run.add_argument('-n', '--dry-run', action='store_true')
 
     snapshots = commands.add_parser('snapshots', add_help=False)
     snapshots.add_argument('-h', '--help', action='store_true', dest='show_help')
+    snapshots_commands = snapshots.add_subparsers(dest='snapshots_command', metavar='COMMAND')
+    snapshots_list = snapshots_commands.add_parser('list', add_help=False)
+    snapshots_list.add_argument('-h', '--help', action='store_true', dest='show_help')
+    # This verb renders the fzf preview panes as well as answering a typed `snapshots show`.
+    # It was two hidden preview-* commands, which is the same command with the name left off.
+    snapshots_show = snapshots_commands.add_parser('show', add_help=False)
+    snapshots_show.add_argument('-h', '--help', action='store_true', dest='show_help')
+    snapshots_show.add_argument('date', nargs='?', metavar='DATE')
+    snapshots_show.add_argument('--source', metavar='PATH')
 
     tags = commands.add_parser('tags', add_help=False)
     tags.add_argument('-h', '--help', action='store_true', dest='show_help')
-    tags.add_argument('name', nargs='?', metavar='NAME')
-    tags.add_argument('--from', dest='from_date', metavar='DATE')
+    tags_commands = tags.add_subparsers(dest='tags_command', metavar='COMMAND')
+    tags_list = tags_commands.add_parser('list', add_help=False)
+    tags_list.add_argument('-h', '--help', action='store_true', dest='show_help')
+    tags_list.add_argument('--from', dest='from_date', metavar='DATE')
+    tags_show = tags_commands.add_parser('show', add_help=False)
+    tags_show.add_argument('-h', '--help', action='store_true', dest='show_help')
+    tags_show.add_argument('name', nargs='?', metavar='NAME')
+    tags_show.add_argument('--from', dest='from_date', metavar='DATE')
 
     restore = commands.add_parser('restore', add_help=False)
     restore.add_argument('-h', '--help', action='store_true', dest='show_help')
@@ -2075,14 +2165,6 @@ def build_parser():
     config_edit = config_commands.add_parser('edit', add_help=False)
     config_edit.add_argument('-h', '--help', action='store_true', dest='show_help')
 
-    # Undocumented on purpose: these render a snapshot and a source for the pickers, so they
-    # are machine plumbing rather than verbs anyone types.
-    preview = commands.add_parser('preview-snapshot', add_help=False)
-    preview.add_argument('date', metavar='DATE')
-    preview_one = commands.add_parser('preview-source', add_help=False)
-    preview_one.add_argument('date', metavar='DATE')
-    preview_one.add_argument('source', metavar='PATH')
-
     # Kept so main() can tell a command typed alone from one that stated its intent and omitted
     # an option -- the first shows help, the second gets an error naming what is missing.
     parser.subcommands = commands.choices
@@ -2090,20 +2172,32 @@ def build_parser():
     return parser
 
 
+SCREENS = {
+    'backup': show_backup_help,
+    'snapshots': show_snapshots_help,
+    'tags': show_tags_help,
+    'restore': show_restore_help,
+    'config': show_config_help,
+}
+
+# Every namespace, and the attribute its chosen verb lands in. 'restore' is absent because it is
+# a verb rather than a resource -- it takes no verb after it, and typed_alone covers its bare form.
+NAMESPACE_VERBS = {
+    'backup': 'backup_command',
+    'snapshots': 'snapshots_command',
+    'tags': 'tags_command',
+    'config': 'config_command',
+}
+
+
 def screen_for(args):
     """The help screen covering whatever the reader has typed so far.
 
-    Only the commands with a surface worth its own screen get one. `snapshots` and `tags` fall
-    back to the root, which already documents them in full — a screen per flag would be a page
-    you have to read to learn there was nothing on it.
+    One screen per namespace rather than one per verb: a namespace's screen documents its verbs
+    and their flags together, so `backup --help` and `backup run --help` reach the same page
+    instead of a drill-down you have to read to learn there was nothing on it.
     """
-    if args.command == 'backup':
-        return show_backup_help
-    if args.command == 'restore':
-        return show_restore_help
-    if args.command == 'config':
-        return show_config_help
-    return show_help
+    return SCREENS.get(args.command, show_help)
 
 
 def typed_alone(parser, args):
@@ -2154,6 +2248,13 @@ def main():
         show_help()
         sys.exit(2)
 
+    # A namespace names a resource without selecting a verb, so a bare one shows its own screen
+    # and exits 2 as a bare invocation does, rather than guessing which verb was meant.
+    verb_attribute = NAMESPACE_VERBS.get(args.command)
+    if verb_attribute and getattr(args, verb_attribute) is None:
+        screen_for(args)()
+        sys.exit(2)
+
     if args.command == 'restore' and typed_alone(parser, args):
         # No args shows help, always -- an incomplete command line is answered with the screen
         # that completes it, never with an error. `restore --all` with --to forgotten is the
@@ -2168,12 +2269,19 @@ def main():
         print(f'  Rehearse first: {cyan("safekeep restore --to /tmp/restore-test --all")}\n', file=sys.stderr)
         sys.exit(2)
 
+    # Both positionals are nargs='?' for the same reason --to is not argparse-required: asking
+    # how to use a verb must not fail on the very argument the answer explains.
+    if args.command == 'snapshots' and args.snapshots_command == 'show' and not args.date:
+        print(f'\n  {red("snapshots show needs a date")}: which snapshot to describe', file=sys.stderr)
+        print(f'  The dates are the rows of {cyan("safekeep snapshots list")}\n', file=sys.stderr)
+        sys.exit(2)
+
+    if args.command == 'tags' and args.tags_command == 'show' and not args.name:
+        print(f'\n  {red("tags show needs a name")}: which tag to describe', file=sys.stderr)
+        print(f'  The names are the rows of {cyan("safekeep tags list")}\n', file=sys.stderr)
+        sys.exit(2)
+
     if args.command == 'config':
-        # A bare `safekeep config` selects nothing, so it shows help and exits 2 like a bare
-        # invocation does, rather than guessing that 'show' was meant.
-        if args.config_command is None:
-            show_config_help()
-            sys.exit(2)
         if args.config_command == 'init':
             init_config(args.config or args.name)
             sys.exit(0)
@@ -2189,16 +2297,21 @@ def main():
     config_path = resolve_config(args.config)
     config, warnings = load_config(config_path)
 
-    if args.command == 'preview-snapshot':
-        preview_snapshot(Path(config['back_up_to']).expanduser(), args.date)
-    elif args.command == 'preview-source':
-        preview_source(Path(config['back_up_to']).expanduser(), args.date, args.source)
-    elif args.command == 'config':
+    if args.command == 'config':
         show_config(config_path, config, warnings)
     elif args.command == 'snapshots':
-        show_snapshots(Path(config['back_up_to']).expanduser())
+        dest = Path(config['back_up_to']).expanduser()
+        if args.snapshots_command == 'list':
+            show_snapshot_list(dest)
+        elif args.source:
+            show_snapshot_source_files(dest, args.date, args.source)
+        else:
+            show_snapshot_record(dest, args.date)
     elif args.command == 'tags':
-        show_tags(config, config_path, args)
+        if args.tags_command == 'list':
+            show_tag_list(config, config_path, args)
+        else:
+            show_tag(config, config_path, args)
     elif args.command == 'restore':
         do_restore(config, config_path, args)
     elif args.command == 'backup':

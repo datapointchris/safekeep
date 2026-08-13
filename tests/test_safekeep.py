@@ -191,11 +191,61 @@ def test_unknown_command_is_a_usage_error(tmp_path):
     assert result.returncode == 2
 
 
-def test_help_hides_the_fzf_preview_helper(tmp_path):
-    """preview-snapshot exists only to feed fzf's preview pane; it is not user surface."""
+def test_every_command_in_the_tree_is_documented(tmp_path):
+    """The fzf preview panes used to run two hidden preview-* commands. They are `snapshots
+    show` now, so nothing in the tree is undocumented and the old names are gone."""
     result = run_safekeep('--help')
     assert 'preview-snapshot' not in result.stdout
+    assert 'preview-source' not in result.stdout
     assert 'SUPPRESS' not in result.stdout
+    assert 'safekeep snapshots show' in result.stdout
+    assert run_safekeep('preview-snapshot', '2026-08-13').returncode == 2
+
+
+@pytest.mark.parametrize('namespace', ['backup', 'snapshots', 'tags', 'config'])
+def test_a_bare_namespace_shows_its_own_help(tmp_path, namespace):
+    """A namespace names a resource without selecting a verb, so it prints the screen that
+    completes the command line rather than guessing which verb was meant."""
+    result = run_safekeep(namespace)
+    assert result.returncode == 2
+    assert f'safekeep {namespace}' in result.stdout
+    assert result.stderr == ''
+
+
+def test_a_bare_backup_writes_nothing(tmp_path, source_tree):
+    """The whole point of the verb: `backup` used to copy every configured path the moment it
+    was typed, so walking the tree one token at a time wrote to the destination."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    result = run_safekeep('--config', str(config_path), 'backup')
+    assert result.returncode == 2
+    assert 'safekeep backup run' in result.stdout
+    assert not dest.exists()
+
+
+def test_a_namespace_screen_names_its_verbs(tmp_path):
+    for namespace, verbs in (('snapshots', ('list', 'show')), ('tags', ('list', 'show')), ('backup', ('run',))):
+        result = run_safekeep(namespace, '--help')
+        assert result.returncode == 0
+        for verb in verbs:
+            assert f'safekeep {namespace} {verb}' in result.stdout
+
+
+def test_a_verb_missing_its_argument_says_which_one(tmp_path, source_tree):
+    """Both positionals are optional in the parser so `--help` reaches its screen; the error
+    that replaces argparse's names the argument and where to find its values."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    for verb, wanted in (('snapshots', 'snapshots list'), ('tags', 'tags list')):
+        result = run_safekeep('--config', str(config_path), verb, 'show')
+        assert result.returncode == 2
+        assert wanted in result.stderr
+
+
+def test_a_verbs_help_is_its_namespaces_screen(tmp_path):
+    """One screen per namespace, so `backup --help` and `backup run --help` reach the same page
+    rather than a drill-down you read to learn there was nothing on it."""
+    assert run_safekeep('backup', 'run', '--help').stdout == run_safekeep('backup', '--help').stdout
 
 
 # --- config loading -------------------------------------------------------------------
@@ -396,7 +446,7 @@ def test_restore_recreates_a_private_directory_at_its_own_mode(tmp_path):
     (private / 'pubring.kbx').write_text('keys\n')
 
     config_path = write_config(tmp_path, dest, back_up_paths=paths(private))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     flatten_modes(next(d for d in dest.iterdir() if d.is_dir()))
 
     result = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
@@ -438,7 +488,7 @@ def test_survey_survives_symlink_cycle(tmp_path):
 def test_backup_writes_manifest_with_groups_and_tags(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=[{'path': str(source_tree / 'notes'), 'tags': ['docs']}])
-    result = run_safekeep('--config', str(config_path), 'backup')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert result.returncode == 0, result.stderr
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
@@ -461,7 +511,7 @@ def test_backup_narrows_to_the_sources_a_tag_covers(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', ['conf']))
 
-    result = run_safekeep('--config', str(config_path), 'backup', '--tag', 'conf')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'conf')
     assert result.returncode == 0, result.stderr
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
@@ -474,8 +524,8 @@ def test_a_narrowed_backup_keeps_the_groups_it_did_not_cover(tmp_path, source_tr
     groups would leave them on disk and unrestorable, since the manifest is the only record."""
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', ['conf']))
-    run_safekeep('--config', str(config_path), 'backup')
-    run_safekeep('--config', str(config_path), 'backup', '--tag', 'conf')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'conf')
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
     manifest = json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
@@ -494,7 +544,7 @@ def test_backup_by_unknown_tag_is_a_usage_error(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
 
-    result = run_safekeep('--config', str(config_path), 'backup', '--tag', 'nope')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'nope')
     assert result.returncode == 2
     assert 'docs' in result.stderr
     assert not dest.exists()
@@ -504,7 +554,7 @@ def test_backup_by_unknown_group_lists_the_paths_there_are(tmp_path, source_tree
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
 
-    result = run_safekeep('--config', str(config_path), 'backup', '--source', 'zzz')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run', '--source', 'zzz')
     assert result.returncode == 2
     assert str(source_tree / 'notes') in plain(result.stderr)
 
@@ -519,7 +569,7 @@ def test_backup_skips_a_path_that_does_not_exist_here(tmp_path, source_tree):
         dest,
         back_up_paths=[{'path': str(source_tree / 'notes')}, {'path': '/mnt/c/Users/nobody/Documents'}],
     )
-    result = run_safekeep('--config', str(config_path), 'backup')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert result.returncode == 0, result.stderr
     assert 'not found' in plain(result.stdout)
     assert '/mnt/c/Users/nobody/Documents' in plain(result.stdout)
@@ -537,7 +587,7 @@ def test_backup_skips_a_git_repo_that_does_not_exist_here(tmp_path, source_tree)
         back_up_paths=paths(source_tree / 'notes'),
         git={'repos': [{'path': str(tmp_path / 'no-such-repo')}], 'back_up_ignored_files_matching': ['*.env']},
     )
-    result = run_safekeep('--config', str(config_path), 'backup')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert result.returncode == 0, result.stderr
     assert 'not found' in plain(result.stdout)
 
@@ -555,7 +605,7 @@ def test_backup_warns_when_a_listed_repo_is_not_a_git_repo(tmp_path, source_tree
     (not_a_repo / 'file.txt').write_text('x\n')
     config_path = write_config(tmp_path, dest, git={'repos': [{'path': str(not_a_repo)}]})
 
-    result = run_safekeep('--config', str(config_path), 'backup')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert result.returncode == 0, result.stderr
     assert 'could not list untracked files' in plain(result.stdout)
 
@@ -568,7 +618,7 @@ def test_backup_names_every_file_it_skipped_for_size(tmp_path, source_tree):
     big.write_bytes(b'0' * (2 * 1024 * 1024))
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'), skip_files_over_mb=1)
 
-    result = run_safekeep('--config', str(config_path), 'backup')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert result.returncode == 0, result.stderr
     assert 'skipped 1 file over 1 MB' in plain(result.stdout)
 
@@ -586,7 +636,7 @@ def test_backup_fails_fast_on_an_unwritable_destination(tmp_path, source_tree):
     dest.chmod(0o555)
     try:
         config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-        result = run_safekeep('--config', str(config_path), 'backup')
+        result = run_safekeep('--config', str(config_path), 'backup', 'run')
         assert result.returncode == 1
         assert 'not writable' in result.stderr
         assert str(dest) in plain(result.stderr)
@@ -597,7 +647,7 @@ def test_backup_fails_fast_on_an_unwritable_destination(tmp_path, source_tree):
 def test_backup_records_config_warnings_in_manifest(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'), keep=5)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
     manifest = json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
@@ -607,7 +657,7 @@ def test_backup_records_config_warnings_in_manifest(tmp_path, source_tree):
 def test_dry_run_writes_nothing(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup', '--dry-run')
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--dry-run')
     assert not any(dest.iterdir())
 
 
@@ -617,7 +667,7 @@ def test_backup_does_not_prune_old_snapshots(tmp_path, source_tree):
     for old in ('2020-01-01', '2020-01-02', '2020-01-03'):
         (dest / old).mkdir()
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     assert (dest / '2020-01-01').exists()
     assert (dest / '2020-01-03').exists()
 
@@ -645,9 +695,9 @@ def test_an_unchanged_file_is_hard_linked_into_the_next_snapshot(tmp_path, sourc
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     plain = source_tree / 'notes' / 'plain.md'
 
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     previous = age_todays_snapshot(dest)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
 
     assert snapshot_copy_of(current, plain).stat().st_ino == snapshot_copy_of(previous, plain).stat().st_ino
@@ -659,10 +709,10 @@ def test_a_changed_file_is_copied_rather_than_linked(tmp_path, source_tree):
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     plain = source_tree / 'notes' / 'plain.md'
 
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     previous = age_todays_snapshot(dest)
     plain.write_text('edited\n')
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
 
     assert snapshot_copy_of(current, plain).read_text() == 'edited\n'
@@ -674,11 +724,11 @@ def test_the_manifest_names_the_snapshot_it_shares_inodes_with(tmp_path, source_
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
 
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     previous = age_todays_snapshot(dest)
     assert json.loads((previous / safekeep.MANIFEST_NAME).read_text())['linked_from'] is None
 
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
     assert json.loads((current / safekeep.MANIFEST_NAME).read_text())['linked_from'] == '2020-01-01'
 
@@ -689,10 +739,10 @@ def test_a_second_run_the_same_day_does_not_link_against_itself(tmp_path, source
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     plain = source_tree / 'notes' / 'plain.md'
 
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     today = next(d for d in dest.iterdir() if d.is_dir())
     plain.write_text('same day edit\n')
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     assert json.loads((today / safekeep.MANIFEST_NAME).read_text())['linked_from'] is None
     assert snapshot_copy_of(today, plain).read_text() == 'same day edit\n'
@@ -726,7 +776,7 @@ def test_git_untracked_becomes_its_own_group(tmp_path):
 
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, git={'repos': [{'path': str(repo), 'tags': ['wip']}]})
-    result = run_safekeep('--config', str(config_path), 'backup')
+    result = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert result.returncode == 0, result.stderr
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
@@ -754,7 +804,7 @@ def test_snapshots_flags_manifestless_directories(tmp_path):
     dest = tmp_path / 'dest'
     (dest / '2026-01-01').mkdir(parents=True)
     config_path = write_config(tmp_path, dest)
-    result = run_safekeep('--config', str(config_path), 'snapshots')
+    result = run_safekeep('--config', str(config_path), 'snapshots', 'list')
     assert 'no manifest' in result.stdout
 
 
@@ -772,9 +822,9 @@ def tagged(tmp_path, dest, *entries):
 def test_tags_lists_each_tag_with_what_it_would_restore(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs', 'rebuild']))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
-    result = run_safekeep('--config', str(config_path), 'tags')
+    result = run_safekeep('--config', str(config_path), 'tags', 'list')
     assert result.returncode == 0
     out = plain(result.stdout)
     assert '2 tags' in out
@@ -787,10 +837,10 @@ def test_tags_flags_a_tag_the_snapshot_predates(tmp_path, source_tree):
     already exist, so `restore --tag` comes back empty while the config plainly carries the tag."""
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', ['wsl']))
-    out = plain(run_safekeep('--config', str(config_path), 'tags').stdout)
+    out = plain(run_safekeep('--config', str(config_path), 'tags', 'list').stdout)
     assert 'wsl' in out
     assert 'not in this snapshot' in out
 
@@ -800,20 +850,20 @@ def test_tags_keeps_listing_a_tag_the_config_dropped(tmp_path, source_tree):
     the snapshots taken before the removal answer to."""
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     tagged(tmp_path, dest, (source_tree / 'notes', ['rebuild']))
-    assert 'docs' in plain(run_safekeep('--config', str(config_path), 'tags').stdout)
-    detail = plain(run_safekeep('--config', str(config_path), 'tags', 'docs').stdout)
+    assert 'docs' in plain(run_safekeep('--config', str(config_path), 'tags', 'list').stdout)
+    detail = plain(run_safekeep('--config', str(config_path), 'tags', 'show', 'docs').stdout)
     assert 'tagged in the snapshot only' in detail
 
 
 def test_tags_names_the_restore_that_would_bring_one_back(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
-    out = plain(run_safekeep('--config', str(config_path), 'tags', 'docs').stdout)
+    out = plain(run_safekeep('--config', str(config_path), 'tags', 'show', 'docs').stdout)
     assert '--tag docs' in out
     assert str(source_tree / 'notes') in out
 
@@ -821,18 +871,18 @@ def test_tags_names_the_restore_that_would_bring_one_back(tmp_path, source_tree)
 def test_tags_from_sizes_against_the_snapshot_named(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     date = next(d.name for d, _ in safekeep.list_snapshots(dest))
 
-    out = plain(run_safekeep('--config', str(config_path), 'tags', 'docs', '--from', date).stdout)
+    out = plain(run_safekeep('--config', str(config_path), 'tags', 'show', 'docs', '--from', date).stdout)
     assert f'--from {date}' in out, 'the restore it prints has to reach the snapshot it just sized'
-    assert run_safekeep('--config', str(config_path), 'tags', '--from', '2020-01-01').returncode == 1
+    assert run_safekeep('--config', str(config_path), 'tags', 'list', '--from', '2020-01-01').returncode == 1
 
 
 def test_unknown_tag_lists_the_ones_that_exist(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
-    result = run_safekeep('--config', str(config_path), 'tags', 'nope')
+    result = run_safekeep('--config', str(config_path), 'tags', 'show', 'nope')
     assert result.returncode == 2  # usage error: a name that was never valid
     assert 'docs' in result.stderr
 
@@ -842,14 +892,14 @@ def test_tags_counts_the_sources_no_tag_reaches(tmp_path, source_tree):
     before a rebuild rather than during one."""
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', []))
-    out = plain(run_safekeep('--config', str(config_path), 'tags').stdout)
+    out = plain(run_safekeep('--config', str(config_path), 'tags', 'list').stdout)
     assert 'untagged: 1 source' in out
 
 
 def test_tags_works_before_the_first_backup(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
-    result = run_safekeep('--config', str(config_path), 'tags')
+    result = run_safekeep('--config', str(config_path), 'tags', 'list')
     assert result.returncode == 0
     assert 'no snapshots' in plain(result.stdout)
 
@@ -859,7 +909,7 @@ def test_a_bare_string_tag_is_fatal(tmp_path, source_tree):
     selecting nothing from a snapshot whose config plainly carries the tag."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=[{'path': str(source_tree / 'notes'), 'tags': 'wsl'}])
-    result = run_safekeep('--config', str(config_path), 'tags')
+    result = run_safekeep('--config', str(config_path), 'tags', 'list')
     assert result.returncode == 1
     assert 'list of strings' in result.stderr
 
@@ -919,7 +969,7 @@ def backup_and_restore(tmp_path, source_tree, *restore_args, config_extra=None):
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree, **(config_extra or {}))
-    backup = run_safekeep('--config', str(config_path), 'backup')
+    backup = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert backup.returncode == 0, backup.stderr
     restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), *restore_args)
     return restore, target
@@ -928,7 +978,7 @@ def backup_and_restore(tmp_path, source_tree, *restore_args, config_extra=None):
 def test_restore_requires_to(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     result = run_safekeep('--config', str(config_path), 'restore', '--all')
     assert result.returncode == 2  # usage error, per cli-design.md
     assert '--to' in result.stderr
@@ -974,7 +1024,7 @@ def test_restore_repairs_modes_the_destination_could_not_store(tmp_path, source_
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
     flatten_modes(snapshot)
@@ -1069,7 +1119,7 @@ def conflicting(tmp_path, source_tree, policy, existing_text='mine\n', existing_
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree)
-    backup = run_safekeep('--config', str(config_path), 'backup')
+    backup = run_safekeep('--config', str(config_path), 'backup', 'run')
     assert backup.returncode == 0, backup.stderr
 
     in_dir = target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md'
@@ -1153,7 +1203,7 @@ def test_restore_skips_a_group_missing_from_the_snapshot(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
     (snapshot / safekeep.snapshot_rel(source_tree / 'solo.conf')).unlink()
@@ -1202,7 +1252,7 @@ def test_restore_remaps_a_different_home(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
     manifest_path = snapshot / safekeep.MANIFEST_NAME
@@ -1255,7 +1305,7 @@ def test_repo_groups_sharing_a_subtree_are_restored_once(tmp_path):
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = write_config(tmp_path, dest, git={'repos': [{'path': str(repo)}], 'back_up_ignored_files_matching': ['secrets.env']})
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
     manifest = json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
@@ -1301,7 +1351,7 @@ def test_restore_names_each_file_and_says_which_are_gitignored(tmp_path):
     dest = tmp_path / 'dest'
     repo = repo_with_untracked_and_ignored(tmp_path)
     config_path = repo_config(tmp_path, dest, repo)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     result = run_safekeep('--config', str(config_path), 'restore', '--to', str(tmp_path / 'target'), '--all')
     assert result.returncode == 0, result.stderr
@@ -1318,7 +1368,7 @@ def test_restore_leaves_the_modes_of_files_no_snapshot_holds(tmp_path):
     dest = tmp_path / 'dest'
     repo = repo_with_untracked_and_ignored(tmp_path)
     config_path = repo_config(tmp_path, dest, repo)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     target = tmp_path / 'target'
     standing = target / safekeep.snapshot_rel(repo)
@@ -1345,7 +1395,7 @@ def test_restore_reports_the_files_it_left_alone_as_unchanged(tmp_path, source_t
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
     run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
 
     again = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
@@ -1377,7 +1427,7 @@ def test_no_input_refuses_to_ask_even_on_a_terminal(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree)
-    assert run_safekeep('--config', str(config_path), 'backup').returncode == 0
+    assert run_safekeep('--config', str(config_path), 'backup', 'run').returncode == 0
 
     primary, secondary = pty.openpty()
     command = [
@@ -1435,7 +1485,7 @@ def test_ask_restores_the_files_answered_yes_and_keeps_the_rest(tmp_path, source
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     notes = target / safekeep.snapshot_rel(source_tree / 'notes')
     notes.mkdir(parents=True)
@@ -1455,7 +1505,7 @@ def test_ask_can_be_answered_once_for_everything_remaining(tmp_path, source_tree
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     notes = target / safekeep.snapshot_rel(source_tree / 'notes')
     notes.mkdir(parents=True)
@@ -1472,7 +1522,7 @@ def test_ask_quits_without_touching_what_it_had_not_reached(tmp_path, source_tre
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = matrix_config(tmp_path, dest, source_tree)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     notes = target / safekeep.snapshot_rel(source_tree / 'notes')
     notes.mkdir(parents=True)
@@ -1491,7 +1541,7 @@ def test_a_source_records_the_files_of_its_git_groups(tmp_path):
     dest = tmp_path / 'dest'
     repo = repo_with_untracked_and_ignored(tmp_path)
     config_path = repo_config(tmp_path, dest, repo)
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     snapshot = next(d for d in dest.iterdir() if d.is_dir())
     manifest = json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
@@ -1506,7 +1556,7 @@ def test_fzf_is_only_required_for_interactive_selection(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
 
     bin_dir = tmp_path / 'fzf-less-bin'
     bin_dir.mkdir()

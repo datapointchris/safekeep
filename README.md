@@ -23,16 +23,17 @@ were irreplaceable after they are gone.
 ## Using it
 
 ```bash
-safekeep backup                  # copy the configured paths into today's snapshot
-safekeep backup --tag work       # tag the snapshot
-safekeep snapshots               # list what is at the destination
-safekeep tags                    # what each tag covers, and what it would restore
+safekeep backup run              # copy the configured paths into today's snapshot
+safekeep backup run --tag work   # only the entries carrying that tag
+safekeep snapshots list          # list what is at the destination
+safekeep tags list               # what each tag covers, and what it would restore
 safekeep restore --to ./here     # restore sources from a snapshot
 safekeep config example          # print a starting config
 ```
 
-Bare `safekeep` prints usage. Nothing writes without an explicit verb. `safekeep --help` is the one
-copy of the command surface — it is not repeated here.
+The verb comes last, and nothing acts until one selects it — a partial command prints the screen
+that completes it rather than guessing. `safekeep --help` is the one copy of the command surface, so
+it is not repeated here.
 
 [`docs/reference.md`](docs/reference.md) is the full behaviour: the manifest format, the restore
 conflict policies, the schema-change rules, and the reasoning behind each of them.
