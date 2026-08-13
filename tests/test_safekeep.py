@@ -797,6 +797,41 @@ def test_the_manifest_names_the_snapshot_it_shares_inodes_with(tmp_path, source_
     assert json.loads((current / safekeep.MANIFEST_NAME).read_text())['linked_from'] == '2020-01-01'
 
 
+def test_linked_from_reads_inodes_rather_than_the_rsync_flag(tmp_path, source_tree):
+    """Passing --link-dest is not evidence it happened: openrsync lacks the option, and a
+    destination can refuse link() and leave rsync copying. Neither is reported. The field named
+    a snapshot it might share nothing with, which is the one thing it existed to answer."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    previous = age_todays_snapshot(dest)
+
+    # rsync links on a content match, so the link-dest copies are made to differ from the source.
+    # --link-dest is still passed and still finds nothing to link, which is the shape of a
+    # destination that refuses link(). The old code recorded the name regardless.
+    for stored in previous.rglob('*'):
+        if stored.is_file() and stored.name != safekeep.MANIFEST_NAME:
+            stored.write_text('different\n')
+
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
+    assert json.loads((current / safekeep.MANIFEST_NAME).read_text())['linked_from'] is None
+
+
+def test_a_snapshot_says_whether_it_shares_storage(tmp_path, source_tree):
+    """The field only answers the question if it is readable without opening the JSON."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    previous = age_todays_snapshot(dest)
+    assert 'full copy' in run_safekeep('--config', str(config_path), 'snapshots', 'show', previous.name).stdout
+
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
+    shown = plain(run_safekeep('--config', str(config_path), 'snapshots', 'show', current.name).stdout)
+    assert f'shares inodes with {previous.name}' in shown
+
+
 def test_a_second_run_the_same_day_does_not_link_against_itself(tmp_path, source_tree):
     """Linking a snapshot in progress against itself would pin the version it is replacing."""
     dest = tmp_path / 'dest'

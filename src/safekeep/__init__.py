@@ -569,6 +569,43 @@ def merge_survey(manifest, survey):
     manifest['skipped_large'].extend(survey['skipped_large'])
 
 
+# A file that changed this run is a fresh copy however much else linked, so one sample can miss
+# real sharing. Bounded rather than exhaustive because proving a negative means walking the whole
+# tree, and every stat is a network round trip. Sharing is found in the first few files when it
+# is happening at all, so the bound only costs anything on a destination that cannot link.
+LINK_PROBE_LIMIT = 200
+
+
+def link_source_of(snapshot_dir, link_dest):
+    """The name of the snapshot this one is observed to share inodes with, or None.
+
+    Asking rsync for --link-dest is not evidence it happened. The option is absent on openrsync,
+    and a destination filesystem can refuse link() and leave rsync copying instead -- neither is
+    reported, and the run succeeds either way. SMB without Unix extensions is exactly that case,
+    and it is the primary destination.
+
+    So this reads the inodes rather than the flag. Recording the flag meant the manifest named a
+    snapshot it might share nothing with, which is the one field that could have answered whether
+    the linking works here.
+    """
+    if link_dest is None:
+        return None
+    checked = 0
+    for dirpath, _, filenames in os.walk(snapshot_dir):
+        for name in filenames:
+            here = Path(dirpath) / name
+            there = Path(link_dest) / here.relative_to(snapshot_dir)
+            try:
+                if here.stat().st_ino == there.stat().st_ino:
+                    return Path(link_dest).name
+            except OSError:
+                continue
+            checked += 1
+            if checked >= LINK_PROBE_LIMIT:
+                return None
+    return None
+
+
 def link_dest_flags(link_dest):
     """--link-dest against the previous snapshot, when there is one and this rsync has it.
 
@@ -845,6 +882,10 @@ def show_snapshot_record(dest, date):
     print(f'config: {manifest.get("config_name", "?")}   home: {manifest.get("home", "?")}')
     if manifest.get('label'):
         print(f'label: {manifest["label"]}')
+    # Named because it is what says whether this destination can hard-link at all. A run of
+    # snapshots all reading "full copy" means every one of them costs its full size.
+    linked = manifest.get('linked_from')
+    print(f'storage: {f"shares inodes with {linked}" if linked else "full copy"}')
     print()
     for row in source_rows(manifest.get('groups', [])):
         tags = ' '.join(row['tags'])
@@ -1726,10 +1767,9 @@ def do_backup(config, config_path, warnings, args):
         'hostname': os.uname().nodename,
         'home': str(Path.home()),
         'config_name': config_path.stem,
-        # Which snapshot this one shares inodes with, so the sharing is visible to whoever
-        # reads the manifest rather than inferable only from a link count. None means a full
-        # copy: the first run, or an rsync without --link-dest.
-        'linked_from': link_dest.name if link_dest is not None and rsync_supports('--link-dest') else None,
+        # Which snapshot this one shares inodes with. Filled in after the copying, from inodes
+        # this run observed sharing -- see link_source_of. None means a full copy.
+        'linked_from': None,
         'excludes': excludes,
         'max_file_size_mb': max_size_mb,
         'default_file_mode': f'{DEFAULT_FILE_MODE:04o}',
@@ -1828,6 +1868,7 @@ def do_backup(config, config_path, warnings, args):
     written = manifest
     if not args.dry_run:
         dest_base.mkdir(parents=True, exist_ok=True)
+        manifest['linked_from'] = link_source_of(dest_base, link_dest)
         written = merge_manifest(read_manifest(dest_base), manifest)
         (dest_base / MANIFEST_NAME).write_text(json.dumps(written, indent=2) + '\n')
 

@@ -159,9 +159,18 @@ Path construction: `back_up_to / YYYY-MM-DD / absolute-path-from-root`
 every snapshot forever costs only what actually changed. Every snapshot still browses and restores
 as a complete tree — there is no chain to walk and no base snapshot that others depend on. The
 manifest's `linked_from` names the snapshot the inodes are shared with, or is `null` for a full
-copy: the first run, or an rsync without `--link-dest`, which is what macOS ships as
-`/usr/bin/openrsync`. Deleting a snapshot directory is always safe; the data survives as long as
-any other snapshot links it.
+copy. Deleting a snapshot directory is always safe; the data survives as long as any other snapshot
+links it.
+
+**`linked_from` records sharing that was observed, not a flag that was passed.** Asking rsync for
+`--link-dest` is not evidence it happened. The option is absent from the openrsync macOS ships as
+`/usr/bin/rsync`, and a destination filesystem can refuse `link()` and leave rsync copying instead —
+SMB without Unix extensions is exactly that case, and it is the primary destination. Neither is
+reported, and the run succeeds either way. The field used to be derived from `rsync --help`, so it
+could name a snapshot it shared nothing with, which made the one field that could answer "does
+linking work on this drive" unable to answer it. It now compares inodes after the copying, and
+`safekeep snapshots show` prints the verdict as `storage: shares inodes with <date>` or
+`storage: full copy`. A run of snapshots all reading `full copy` means every one costs its full size.
 
 The hazard is the same one the hard links buy the saving with: a shared file is the *same inode*
 in every snapshot holding it, so editing one in place edits all of them. Copy out before touching
