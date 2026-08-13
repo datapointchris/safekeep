@@ -2039,7 +2039,7 @@ def show_config(config_path, config, warnings):
 
 
 def show_help():
-    help_header('safekeep', 'Dated snapshots of the files no package manager will put back.')
+    help_header('safekeep', 'Timestamped snapshots of the files no package manager will put back.')
     help_usage('safekeep <resource> <verb> [OPTIONS]')
 
     help_text(
