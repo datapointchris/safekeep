@@ -1,6 +1,59 @@
 # CHANGELOG
 
 
+## v2.0.0 (2026-08-13)
+
+### Bug Fixes
+
+- Record inode sharing observed, not the flag that was passed
+  ([`d7fa9c6`](https://github.com/datapointchris/safekeep/commit/d7fa9c6eafdce01e048bc7ee8d14253df0586c4d))
+
+linked_from was set from `rsync --help` containing --link-dest, so it named the previous snapshot
+  whenever the option existed. Asking for --link-dest is not evidence it happened: the option is
+  absent from the openrsync macOS ships as /usr/bin/rsync, and a destination filesystem can refuse
+  link() and leave rsync copying instead. Neither is reported and the run succeeds either way.
+
+SMB without Unix extensions is that second case, and it is the primary destination. So the one field
+  that could answer whether linking works on a given drive was asserting it without looking.
+
+It now compares inodes against the link-dest snapshot after the copying, bounded at 200 files: a
+  file changed this run is a fresh copy however much else linked, so one sample misses real sharing,
+  and proving a negative exhaustively costs a network stat per file.
+
+`snapshots show` prints the verdict, since a field nobody can read answers nothing.
+
+### Features
+
+- One snapshot per run, not one per day
+  ([`47d7620`](https://github.com/datapointchris/safekeep/commit/47d762022e52a55d0173d0b66be97dd01499feb2))
+
+A second run on a day rsynced into the same directory, so a file created and then mangled between
+  the two runs lost its good version. The morning copy was overwritten and no earlier snapshot held
+  it, because the file had not existed when the earlier ones were taken. That is precisely the
+  git-untracked work-in-progress safekeep exists for. Measured before changing anything.
+
+Files that survived a previous day were never at risk: rsync writes a temp file and renames it over
+  the target, which breaks the hard link and leaves the older snapshot's inode untouched.
+
+Snapshots are now named for the second the run started. No colon, because NTFS forbids one in a
+  filename and the primary destination is SMB, which rules out strict ISO 8601 -- its extended time
+  separator is exactly what cannot be written. Hyphenated rather than run together as HHMMSS, since
+  a snapshot name is read far more often than typed.
+
+--from still takes a date and resolves to the last run of that day, which is what a person naming a
+  date almost always means. An exact name wins over a prefix, and every caller reports the name it
+  resolved to rather than what was typed.
+
+Snapshots written before this are named for a day alone and stay listable and restorable. The
+  listing pads to the widest name, since a destination carries both shapes and a short row otherwise
+  shifts every column on it.
+
+Two consequences worth knowing. A narrowed run now writes a partial snapshot of its own instead of
+  topping up the day's, so the newest snapshot is not necessarily the most complete one -- the
+  source count per row is where that shows. And --link-dest now targets the previous run rather than
+  the previous day, which is what keeps a busy day cheap.
+
+
 ## v1.0.0 (2026-08-13)
 
 ### Features
