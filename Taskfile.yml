@@ -6,6 +6,20 @@ tasks:
     cmds:
       - task: test
 
+  # A worktree is a clean checkout, so everything gitignored is absent. The
+  # virtualenv comes back from uv.lock; .planning has no manifest and is
+  # recreated from wherever the primary points. PRIMARY is derived rather than
+  # configured — a worktree shares the primary's git directory, so this resolves
+  # from anywhere and no-ops when run in the primary itself.
+  setup:
+    desc: Make a fresh checkout runnable
+    vars:
+      PRIMARY:
+        sh: git rev-parse --path-format=absolute --git-common-dir | sed 's|/\.git$||'
+    cmds:
+      - uv sync
+      - ln -sfn "$(readlink {{.PRIMARY}}/.planning)" .planning
+
   test:
     desc: Run all tests
     cmds:
