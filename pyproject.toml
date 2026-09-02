@@ -119,7 +119,7 @@ safekeep = "safekeep:main"
 [project.urls]
 Repository = "https://github.com/datapointchris/safekeep"
 Issues = "https://github.com/datapointchris/safekeep/issues"
-Changelog = "https://github.com/datapointchris/safekeep/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/datapointchris/safekeep/releases"
 
 [dependency-groups]
 dev = [
