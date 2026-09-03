@@ -1,6 +1,6 @@
 # safekeep reference
 
-The full behaviour, and the reasoning behind it. `README.md` is the short version.
+The full behavior, and the reasoning behind it. `README.md` is the short version.
 
 This document moved here from the dotfiles repository in August 2026, when safekeep became its
 own project. The decisions it records were made while it lived there.
@@ -237,7 +237,7 @@ safekeep backup run --label 'before moving wsl instance'
 ```
 
 **safekeep never reads a label.** It is displayed by `snapshots list`, `snapshots show`, the restore
-snapshot picker and the restore header, and that is the whole of its behaviour. Tags select and a
+snapshot picker and the restore header, and that is the whole of its behavior. Tags select and a
 label explains, which is why they are two things: a tag is vocabulary the config owns and `--tag`
 consumes, and a label is prose about one particular day.
 
@@ -251,7 +251,7 @@ a number no reader checks. Every snapshot taken before this existed has no `labe
 without one — the displays ask with `.get`, and there is no empty column or trailing separator left
 where a note would have been.
 
-**A narrowed run writes a partial snapshot of its own.** `backup run --tag secrets` records the sources that tag covers and nothing else, and the fuller snapshot from earlier sits beside it untouched. This is the one behaviour that changed shape when snapshots became per-run rather than per-day: a narrowed run used to top up the day's snapshot, and now it does not. So the newest snapshot is not necessarily the most complete one. `snapshots list` shows a source count per row, which is where a one-source snapshot beside nine-source ones is visible, and `--from` is how a restore names the fuller one.
+**A narrowed run writes a partial snapshot of its own.** `backup run --tag secrets` records the sources that tag covers and nothing else, and the fuller snapshot from earlier sits beside it untouched. This is the one behavior that changed shape when snapshots became per-run rather than per-day: a narrowed run used to top up the day's snapshot, and now it does not. So the newest snapshot is not necessarily the most complete one. `snapshots list` shows a source count per row, which is where a one-source snapshot beside nine-source ones is visible, and `--from` is how a restore names the fuller one.
 
 `merge_manifest` still exists for the case two runs land inside the same second and therefore share a name. rsync never deletes, so writing a manifest that named only the second run's groups would leave the first run's files on disk and unrestorable — and the manifest is the only record of what a snapshot holds.
 
@@ -280,13 +280,13 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
 
 **A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
 
-**Selection is always explicit.** With `--all`, `--source`, or `--tag`, restore runs non-interactively. With none of them on a terminal, fzf opens: first a snapshot picker previewing each manifest, then a multi-select source picker previewing the files that source holds, labelled untracked or ignored. With none of them and no terminal, it exits non-zero listing the available sources rather than guessing.
+**Selection is always explicit.** With `--all`, `--source`, or `--tag`, restore runs non-interactively. With none of them on a terminal, fzf opens: first a snapshot picker previewing each manifest, then a multi-select source picker previewing the files that source holds, labeled untracked or ignored. With none of them and no terminal, it exits non-zero listing the available sources rather than guessing.
 
 **The source picker is sorted by path**, not in manifest order. Manifest order is config order, which is meaningful to whoever wrote the config and to nobody scanning thirty rows for the one they came for.
 
 Both pickers pin their keys above the prompt — `tab` selects, `shift-tab` deselects, `ctrl-a` takes everything, `enter` restores. Multi-select is fzf's own binding rather than this tool's, so the picker is the only place it can be recalled at the moment it is needed.
 
-**A selection that matched nothing exits 1 and says why.** Cancelling out of the fzf picker is a restore you decided against, and exits 0; `--tag wsl` matching nothing in the snapshot is a request that failed, and a caller has to be able to tell the two apart. The error names the tags that snapshot does carry, which is the fact that distinguishes a typo from a tag added to the config after the snapshot was taken.
+**A selection that matched nothing exits 1 and says why.** Canceling out of the fzf picker is a restore you decided against, and exits 0; `--tag wsl` matching nothing in the snapshot is a request that failed, and a caller has to be able to tell the two apart. The error names the tags that snapshot does carry, which is the fact that distinguishes a typo from a tag added to the config after the snapshot was taken.
 
 Bare `safekeep restore` prints the restore help rather than an error — no args shows help, always. Naming a selection and forgetting `--to` is the other case: intent was stated, so that one is an error naming the single missing option.
 

@@ -1646,7 +1646,7 @@ def do_restore(config, config_path, args):
         rows = source_rows(groups)
 
     if not rows:
-        # An explicit selection that matched nothing is a failed request, not a cancelled one:
+        # An explicit selection that matched nothing is a failed request, not a canceled one:
         # exit non-zero so a caller cannot read it as a restore that happened to be empty.
         if args.all or args.source or args.tag:
             print(f'{red("safekeep:")} nothing selected, nothing restored', file=sys.stderr)
@@ -1665,7 +1665,7 @@ def do_restore(config, config_path, args):
     # A date says when a snapshot was taken and nothing about why, which is the question being
     # answered when an older one is picked on purpose.
     if manifest.get('label'):
-        print(f'  labelled {green(manifest["label"])}')
+        print(f'  labeled {green(manifest["label"])}')
     if manifest_home and manifest_home != target_home:
         print(f'  remapping {cyan(manifest_home)} -> {cyan(target_home)}')
     if args.on_conflict in ('backup', 'overwrite', 'ask') and not args.dry_run:
@@ -1940,7 +1940,7 @@ def do_backup(config, config_path, warnings, args):
     # Read back off the merged manifest rather than off args, so a run that passed no --label
     # still reports the label an earlier run today left on this snapshot.
     if written.get('label'):
-        print(f'  labelled {green(written["label"])}')
+        print(f'  labeled {green(written["label"])}')
 
 
 def init_config(name):

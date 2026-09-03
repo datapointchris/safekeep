@@ -39,7 +39,7 @@ The verb comes last, and nothing acts until one selects it — a partial command
 that completes it rather than guessing. `safekeep --help` is the one copy of the command surface, so
 it is not repeated here.
 
-[`docs/reference.md`](docs/reference.md) is the full behaviour: the manifest format, the restore
+[`docs/reference.md`](docs/reference.md) is the full behavior: the manifest format, the restore
 conflict policies, the schema-change rules, and the reasoning behind each of them.
 
 ## Config

@@ -454,7 +454,7 @@ def test_restore_recreates_a_private_directory_at_its_own_mode(tmp_path):
     assert stat.S_IMODE((target / safekeep.snapshot_rel(private)).stat().st_mode) == 0o700
 
 
-def test_survey_honours_excludes(source_tree):
+def test_survey_honors_excludes(source_tree):
     survey = safekeep.survey_tree(source_tree / 'notes', safekeep.DEFAULT_SKIP_NAMES, None)
     assert not any('.venv' in key for key in survey['modes'])
     assert survey['files'] == 3
@@ -563,7 +563,7 @@ def test_a_same_second_rerun_merges_rather_than_dropping_groups():
     assert merged['label'] == 'written by the first run', 'an absent --label leaves the key out'
 
 
-def labelled_snapshot(tmp_path, dest, source_tree, *extra):
+def labeled_snapshot(tmp_path, dest, source_tree, *extra):
     """Back up once with `extra` appended, and read the manifest it wrote."""
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     result = run_safekeep('--config', str(config_path), 'backup', 'run', *extra)
@@ -573,21 +573,21 @@ def labelled_snapshot(tmp_path, dest, source_tree, *extra):
 
 def test_a_label_says_why_the_backup_was_taken(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
+    _, manifest = labeled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
     assert manifest['label'] == 'before moving wsl instance'
 
 
 def test_a_backup_without_a_label_records_none(tmp_path, source_tree):
-    """Absent rather than empty: nothing reads the key, so a snapshot that was never labelled
+    """Absent rather than empty: nothing reads the key, so a snapshot that was never labeled
     should not claim a field it has no answer for."""
     dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree)
+    _, manifest = labeled_snapshot(tmp_path, dest, source_tree)
     assert 'label' not in manifest
 
 
 def test_an_empty_label_records_none(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    _, manifest = labelled_snapshot(tmp_path, dest, source_tree, '--label', '')
+    _, manifest = labeled_snapshot(tmp_path, dest, source_tree, '--label', '')
     assert manifest['label'] is None
 
 
@@ -1073,7 +1073,7 @@ def test_snapshots_flags_manifestless_directories(tmp_path):
 
 def test_both_snapshot_views_show_the_label(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
+    config_path, _ = labeled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
     date = next(d for d in dest.iterdir() if d.is_dir()).name
 
     listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
@@ -1088,7 +1088,7 @@ def test_a_snapshot_without_a_label_renders_clean(tmp_path, source_tree):
     """The degradation case, and the one every snapshot taken before this existed lands in:
     no trailing separator, no empty column, nothing claiming a note that was never written."""
     dest = tmp_path / 'dest'
-    config_path, manifest = labelled_snapshot(tmp_path, dest, source_tree)
+    config_path, manifest = labeled_snapshot(tmp_path, dest, source_tree)
     assert 'label' not in manifest
     date = next(d for d in dest.iterdir() if d.is_dir()).name
 
@@ -1106,7 +1106,7 @@ def test_a_long_label_survives_a_redirect_whole(tmp_path, source_tree):
     falls back to 80 columns rather than declining, so an unguarded call would truncate a
     captured log to a width nothing asked for."""
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', LONG_LABEL)
+    config_path, _ = labeled_snapshot(tmp_path, dest, source_tree, '--label', LONG_LABEL)
     listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
     assert LONG_LABEL in listed
     assert '…' not in listed
@@ -1116,7 +1116,7 @@ def test_a_long_label_is_clipped_on_a_terminal(tmp_path, source_tree):
     """The other half of the gate above: on a terminal there is a width to fit, and a row that
     wraps is two rows — which is what stops a column of dates being scannable."""
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', LONG_LABEL)
+    config_path, _ = labeled_snapshot(tmp_path, dest, source_tree, '--label', LONG_LABEL)
 
     primary, secondary = pty.openpty()
     command = [sys.executable, '-m', 'safekeep', '--config', str(config_path), 'snapshots', 'list']
@@ -1140,7 +1140,7 @@ def test_a_restore_names_the_label_of_the_snapshot_it_reads(tmp_path, source_tre
     """A date says when a snapshot was taken and nothing about why, which is the question being
     answered when an older one is picked on purpose."""
     dest = tmp_path / 'dest'
-    config_path, _ = labelled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
+    config_path, _ = labeled_snapshot(tmp_path, dest, source_tree, '--label', 'before moving wsl instance')
     result = run_safekeep('--config', str(config_path), 'restore', '--to', str(tmp_path / 'target'), '--all')
     assert result.returncode == 0, result.stderr
     assert 'before moving wsl instance' in plain(result.stdout)
@@ -1430,7 +1430,7 @@ def test_restore_by_unknown_group_lists_the_sources_the_snapshot_has(tmp_path, s
 
 
 def test_restore_by_unknown_tag_says_which_tags_the_snapshot_has(tmp_path, source_tree):
-    """An explicit selection that matched nothing is a failed request, not a cancelled one — so
+    """An explicit selection that matched nothing is a failed request, not a canceled one — so
     it exits non-zero and names the tags the snapshot actually carries. 'nothing selected' alone
     left no way to tell a typo from a tag added to the config after the snapshot was taken."""
     restore, target = backup_and_restore(tmp_path, source_tree, '--tag', 'nope')
