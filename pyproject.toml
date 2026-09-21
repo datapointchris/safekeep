@@ -142,7 +142,6 @@ dev = [
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
-branch = "main"
 commit_message = "build(release): {version}"
 build_command = """
     pip install uv
