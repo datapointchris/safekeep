@@ -15,26 +15,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # python-semantic-release decides the version from the commit types, writes it
-  # into pyproject.toml, tags, and creates the GitHub release.
-  #
+  # Without this, release publishes whatever is on main, tested or not.
+  validate:
+    uses: ./.github/workflows/validate.yml
+
   # There is no publish job. safekeep is installed from this repo with uv, and
   # the private index is the next channel; nothing goes to public PyPI. The tag
   # is what an install resolves against.
-  version:
-    runs-on: ubuntu-latest
+  release:
+    needs: validate
+    uses: datapointchris/reusable-workflows/.github/workflows/python-semantic-release.yml@v1
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - uses: python-semantic-release/python-semantic-release@v9
-        id: release
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          # The GitHub release body is the changelog. python-semantic-release
-          # builds those notes from the same commits, and by a path independent
-          # of the changelog file, so no CHANGELOG.md is written or tracked.
-          changelog: "false"
