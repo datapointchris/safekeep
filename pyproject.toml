@@ -133,6 +133,9 @@ managed = [
     ["pytest", "ini_options", "minversion"],
     ["pytest", "ini_options", "testpaths"],
 ]
+# Dependencies held at the version the pre-commit hook runs, in every group
+# and extra that names them, so a local run and CI cannot disagree.
+pinned = ["ruff"]
 
 [project.scripts]
 safekeep = "safekeep:main"
@@ -149,7 +152,7 @@ dev = [
     "pre-commit>=4.3.0",
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
-    "ruff>=0.7.0",
+    "ruff==0.12.5",
     # Tests only. tomllib reads TOML but cannot write it, and the alternative was
     # a hand-rolled serializer in the test file; safekeep never writes a config.
     "tomli-w>=1.0.0",
