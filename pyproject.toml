@@ -73,6 +73,7 @@ datetime = "dt"
 sqlalchemy = "sa"
 "pyspark.sql.functions" = "sf"
 "pyspark.sql.types" = "st"
+
 [tool.mypy]
 pretty = true
 ignore_missing_imports = true
