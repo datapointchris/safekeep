@@ -19,6 +19,7 @@ surface is not repeated here -- `safekeep --help` is the one copy of it.
 """
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -29,7 +30,6 @@ import sys
 import tempfile
 import time
 import tomllib
-from datetime import datetime
 from fnmatch import fnmatch
 from functools import cache
 from importlib.metadata import PackageNotFoundError
@@ -1803,7 +1803,7 @@ def do_backup(config, config_path, warnings, args):
         print(f'{red("safekeep:")} destination {yellow(str(dest))} is not writable', file=sys.stderr)
         sys.exit(1)
 
-    snapshot_name = datetime.now().strftime(SNAPSHOT_FORMAT)
+    snapshot_name = dt.datetime.now().strftime(SNAPSHOT_FORMAT)
     dest_base = dest / snapshot_name
     link_dest = previous_snapshot(dest, snapshot_name)
 
@@ -1814,7 +1814,7 @@ def do_backup(config, config_path, warnings, args):
         # is diagnosable rather than mysterious -- 'version' says what the shape
         # is, this says which build chose that shape.
         'safekeep_version': tool_version(),
-        'created': datetime.now().isoformat(timespec='seconds'),
+        'created': dt.datetime.now().isoformat(timespec='seconds'),
         'hostname': os.uname().nodename,
         'home': str(Path.home()),
         'config_name': config_path.stem,
