@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 import tomli_w
+from pyselfupdate import Result
 
 import safekeep
 
@@ -1942,3 +1943,16 @@ def test_update_is_a_command_rather_than_a_usage_error():
     verb resolves at all is what a typo in the parser would break."""
     args = safekeep.build_parser().parse_args(['update'])
     assert args.command == 'update'
+
+
+def test_an_applied_update_names_a_missing_lock_and_ends_through_exit_now(monkeypatch, capsys):
+    exits = []
+    monkeypatch.setattr(safekeep, 'update', lambda config: Result(current='v1.0.0', latest='v2.0.0', applied=True, lock_missing=True))
+    monkeypatch.setattr(safekeep, 'exit_now', lambda: exits.append(0) or sys.exit(0))
+    monkeypatch.setattr(sys, 'argv', ['safekeep', 'update'])
+
+    with pytest.raises(SystemExit):
+        safekeep.main()
+
+    assert exits == [0]
+    assert 'v2.0.0 has no uv.lock' in capsys.readouterr().err

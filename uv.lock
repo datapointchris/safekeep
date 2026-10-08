@@ -474,11 +474,11 @@ wheels = [
 
 [[package]]
 name = "pyselfupdate"
-version = "0.2.2"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/59/5c/e04d57be6b1ef112af6f7f2cbbdfca24422c3d2d1693e75a13a11a557c00/pyselfupdate-0.2.2.tar.gz", hash = "sha256:4c7ae5ef33c7236486e0dfafd4e450d3f8bf68a94dc61feeb9959fc376f1ed0e", size = 22088, upload-time = "2026-08-04T22:05:12.655Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f2/56/37363aeddfe8d3b3e40ed9000a13be524d5b28fd735cda29a99b0b086460/pyselfupdate-0.5.0.tar.gz", hash = "sha256:c14f221cd445e90f7be6d0977c3662682f8e1857e819456f5bb9be8cec4384e8", size = 32239, upload-time = "2026-10-08T21:44:05.782Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cf/24/92e4b0fd575e537488ef0fce2fee36adb0ec058ac42d083796264101029c/pyselfupdate-0.2.2-py3-none-any.whl", hash = "sha256:2a99d98714ebdd33bd2cfdae1fba32027525c10f3aac0084459a3a352da373b1", size = 26550, upload-time = "2026-08-04T22:05:11.802Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/88/0378a3d6a164e2da5dc06eccfa16818fead2520e55a6a04b38beca01f350/pyselfupdate-0.5.0-py3-none-any.whl", hash = "sha256:ccbad29973e308fef2eb21b5714e0cbce1855aec791ed2424c20551e8e2d478e", size = 36830, upload-time = "2026-10-08T21:44:04.9Z" },
 ]
 
 [[package]]
@@ -634,7 +634,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pyselfupdate", specifier = ">=0.2.2" },
+    { name = "pyselfupdate", specifier = ">=0.5.0" },
     { name = "pytermstyle", git = "https://github.com/datapointchris/pytermstyle?tag=v0.1.1" },
 ]
 

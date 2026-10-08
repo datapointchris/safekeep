@@ -38,6 +38,7 @@ from pathlib import Path
 
 from pyselfupdate import Config
 from pyselfupdate import SelfUpdateError
+from pyselfupdate import exit_now
 from pyselfupdate import notify
 from pyselfupdate import update
 from pytermstyle import bold
@@ -2383,8 +2384,12 @@ def main():
             sys.exit(1)
         if result.applied:
             print(f'{green("safekeep")} updated {result.current} → {cyan(result.latest)}')
-        else:
-            print(f'safekeep is already at {cyan(result.current)}')
+            if result.lock_warning:
+                print(f'{yellow("! safekeep:")} {result.lock_warning}', file=sys.stderr)
+            # The install rebuilt this interpreter's venv, and sys.exit would run
+            # interpreter shutdown, which can import from the replaced directory.
+            exit_now()
+        print(f'safekeep is already at {cyan(result.current)}')
         sys.exit(0)
 
     # Deferred: pyselfupdate registers an atexit hook, so the one-line notice

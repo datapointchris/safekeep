@@ -28,7 +28,10 @@ requires-python = ">=3.12"
 # pyselfupdate resolves from PyPI and pytermstyle from git, purely because
 # 'pytermstyle' was already taken there. No [typer] extra — safekeep is argparse,
 # and that extra exists only for the ready-made typer command.
-dependencies = ["pytermstyle", "pyselfupdate>=0.2.2"]
+dependencies = [
+    "pytermstyle",
+    "pyselfupdate>=0.5.0",
+]
 
 [tool.uv.sources]
 # Pinned to a tag rather than tracking main, so a push to pytermstyle cannot
