@@ -195,8 +195,9 @@ SMB without Unix extensions is exactly that case, and it is the primary destinat
 reported, and the run succeeds either way. The field used to be derived from `rsync --help`, so it
 could name a snapshot it shared nothing with, which made the one field that could answer "does
 linking work on this drive" unable to answer it. It now compares inodes after the copying, and
-`safekeep snapshots show` prints the verdict as `storage: shares inodes with <date>` or
-`storage: full copy`. A run of snapshots all reading `full copy` means every one costs its full size.
+`safekeep snapshots show` prints the verdict as `unchanged files: hard links into <snapshot>` or
+`unchanged files: copied in full, linked to no earlier snapshot`. A run of snapshots all reading
+`copied in full` means every one costs its full size.
 
 The hazard is the same one the hard links buy the saving with: a shared file is the *same inode*
 in every snapshot holding it, so editing one in place edits all of them. Copy out before touching

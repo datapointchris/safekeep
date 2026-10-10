@@ -461,7 +461,10 @@ def normalize_entries(entries):
     normalized = []
     for entry in entries:
         if not isinstance(entry, dict) or 'path' not in entry:
-            print(f'{red("safekeep:")} every entry needs a "path" key: {yellow(repr(entry))}', file=sys.stderr)
+            print(
+                f'{red("safekeep:")} every [[back_up_paths]] and [[git.repos]] table needs a "path" key: {yellow(repr(entry))}',
+                file=sys.stderr,
+            )
             sys.exit(1)
         tags = entry.get('tags', [])
         # Fatal rather than coerced: a bare tags = "wsl" is a list of characters to Python, so
@@ -1104,9 +1107,9 @@ def show_snapshot_record(dest, date, config_path, as_json=False):
     if manifest.get('label'):
         print(f'label: {manifest["label"]}')
     # Named because it is what says whether this destination can hard-link at all. A run of
-    # snapshots all reading "full copy" means every one of them costs its full size.
+    # snapshots all copied in full means every one of them costs its full size.
     linked = manifest.get('linked_from')
-    print(f'storage: {f"shares inodes with {linked}" if linked else "full copy"}')
+    print(f'unchanged files: {f"hard links into {linked}" if linked else "copied in full, linked to no earlier snapshot"}')
     print()
     for row in source_rows(manifest.get('groups', [])):
         tags = ' '.join(row['tags'])
@@ -1270,7 +1273,7 @@ def show_tag_list(config, config_path, from_date: str | None, as_json: bool):
     print_tag_sources(config_path, dest, snapshot_dir)
 
     if not index:
-        print(f'\n  Tag the entries and a restore can select them: {cyan(f"{safekeep_for(config_path)} config edit")}')
+        print(f'\n  tag the sources and a restore can select them: {cyan(f"{safekeep_for(config_path)} config edit")}')
         return
 
     print()
@@ -2243,7 +2246,10 @@ def do_restore(config, config_path, request: RestoreRequest):
     if entries:
         changed, recorded = apply_modes(manifest, entries, request.dry_run)
         verb = yellow('would set') if request.dry_run else green('set')
-        detail = f' ({plural(recorded, "recorded deviation")})' if recorded else ''
+        defaults = changed - recorded
+        parts = [f'{recorded} as the snapshot recorded them'] if recorded else []
+        parts += [f'{defaults} at the default {DEFAULT_FILE_MODE:04o} or {DEFAULT_DIR_MODE:04o}'] if defaults > 0 else []
+        detail = f' ({", ".join(parts)})' if parts else ''
         print(f'\n  {verb} modes on {bold(plural(changed, "path"))}{detail}')
 
     symlink_paths = ['/' + rel for rel in symlinks]
@@ -2306,7 +2312,7 @@ def require_known_selection(config, config_path, request: BackupRequest):
     known = sorted({tag for _, _, tags in entries for tag in tags})
     unknown = [tag for tag in request.tag if tag not in known]
     if unknown:
-        print(f'{red("safekeep:")} no entry in {cyan(config_path.name)} carries {yellow(", ".join(unknown))}', file=sys.stderr)
+        print(f'{red("safekeep:")} no source in {cyan(config_path.name)} carries {yellow(", ".join(unknown))}', file=sys.stderr)
         print(f'  tags: {green(", ".join(known)) if known else yellow("none")}', file=sys.stderr)
         sys.exit(2)
     for needle in request.source:

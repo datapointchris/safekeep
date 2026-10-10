@@ -95,27 +95,28 @@ app = typer.Typer(
     context_settings={'help_option_names': ['-h', '--help']},
     help="""Timestamped snapshots of the files no package manager will put back.
 
-    The verb comes last, so a backup → snapshots → restore loop over one destination changes only
-    the final word. Nothing acts until a verb selects it: every partial command prints the screen
-    that completes it.
+    A config names a destination, `back_up_to`, and the sources to copy there: paths, and the
+    untracked and ignored files of git repos. A source can carry tags, names a restore selects by.
+    Each `backup run` copies the sources into a new snapshot, a directory named for the second it
+    started. The snapshot's manifest records what it holds and the file modes the destination
+    cannot keep, so it restores without the config that wrote it.
 
-    Configs live in `~/.config/safekeep/<name>.toml`, one per backup destination, and
-    `safekeep config example` prints an annotated one explaining every key. `-c` and `--no-input`
-    go before the command: `safekeep -c work backup run`.
+    To start, `safekeep config init` writes a config, and `safekeep backup run -n` shows what it
+    would copy. To get files back, rehearse the restore into a scratch directory, then run it with
+    `--to /`. To find what an older machine had and this one lacks, `safekeep files list --missing`.
+    On a new machine with only the drive, a config holding just `back_up_to` reads every snapshot.
 
-    Selection is always explicit, so a restore never guesses at `--all`. Rehearse into a scratch
-    directory before restoring over anything real. A snapshot carries the tags its config had that
-    day, so `safekeep tags list` is what says whether `--tag` selects anything in it.
+    `-c` names the config when there are several, and goes before the command.
     """,
     epilog=examples(
-        ('safekeep config init', 'write ~/.config/safekeep/default.toml'),
-        ('safekeep backup run -n', 'see what a backup would copy'),
-        ('safekeep snapshots list', 'what is on the destination already'),
-        ('safekeep snapshots show 2026-08-13', 'what one snapshot holds'),
+        ('safekeep config init', 'a first config, to set back_up_to and the sources in'),
+        ('safekeep backup run -n', 'what a backup would copy, before it copies anything'),
+        ('safekeep backup run', 'take a snapshot'),
+        ('safekeep snapshots list', 'the snapshots at the destination, newest first'),
         ('safekeep files list --missing', 'what older snapshots hold that this machine lacks'),
-        ('safekeep tags show secrets', 'what that tag would bring back'),
-        (f'safekeep restore --to {REHEARSE_INTO} --all', 'rehearse a restore'),
-        ('safekeep restore --to / --tag secrets', 'restore one tag for real'),
+        (f'safekeep restore --to {REHEARSE_INTO} --all', 'rehearse restoring the newest snapshot'),
+        ('safekeep restore --to / --tag secrets', 'restore the sources tagged secrets, for real'),
+        ('safekeep -c work snapshots list', 'the same, reading the config named work'),
     ),
 )
 
@@ -202,7 +203,9 @@ def root(
             help='Which config to read: a name, or a .toml file. Needed only when there is more than one',
         ),
     ] = None,
-    no_input: Annotated[bool, typer.Option('--no-input', help='Never prompt; fail naming the flag that would have answered')] = False,
+    no_input: Annotated[
+        bool, typer.Option('--no-input', help='Never prompt. A question this run would ask fails instead, naming the flag that answers it')
+    ] = False,
     version: Annotated[
         bool | None,
         typer.Option('--version', '-V', callback=version_callback, is_eager=True, help='Print the running version'),
@@ -231,14 +234,14 @@ backup_app = typer.Typer(
     cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
-    help="""Copy the configured paths into a new snapshot.
+    help="""Copy the config's sources into a new snapshot.
 
-    `safekeep backup run` copies everything the config lists. `--tag` and `--source` narrow it, and
-    a narrowed run records only what it collected, so it writes a partial snapshot rather than
+    `safekeep backup run` copies every source the config lists. `--tag` and `--source` narrow it,
+    and a narrowed run records only what it collected, so it writes a partial snapshot rather than
     topping up a fuller one.
     """,
     epilog=examples(
-        ('safekeep backup run', 'everything the config lists'),
+        ('safekeep backup run', 'every source the config lists'),
         ('safekeep backup run -n', 'what a backup would copy, before it copies it'),
         ("safekeep backup run --label 'before the wsl move'", 'say why, for whoever restores it'),
     ),
@@ -258,25 +261,31 @@ def backup_run(
     ctx: typer.Context,
     tag: Annotated[
         list[str] | None,
-        typer.Option('--tag', metavar='NAME', help='Only entries carrying NAME (repeatable)', rich_help_panel='Selection'),
+        typer.Option('--tag', metavar='NAME', help='Only the sources tagged NAME in the config (repeatable)', rich_help_panel='Selection'),
     ] = None,
     source: Annotated[
         list[str] | None,
-        typer.Option('--source', metavar='PATH', help='Only entries whose path contains PATH (repeatable)', rich_help_panel='Selection'),
+        typer.Option(
+            '--source', metavar='PATH', help='Only the sources whose path contains PATH (repeatable)', rich_help_panel='Selection'
+        ),
     ] = None,
     group: GroupAlias = None,
     label: Annotated[str | None, typer.Option('--label', metavar='NOTE', help='Why this backup was taken, kept in the snapshot')] = None,
     dry_run: DryRunOption = False,
 ) -> None:
-    """Copy the configured paths into a new snapshot.
+    """Copy the config's sources into a new snapshot.
 
-    Everything the config lists, unless `--tag` or `--source` narrows it. A narrowed run records only
+    A source is one entry in the config: a path, or one git repo's untracked and ignored files.
+    Every source is copied unless `--tag` or `--source` narrows the run. A narrowed run records only
     what it collected, so it writes a partial snapshot beside the full one rather than topping it up.
-    `safekeep tags list` says which names there are to narrow by.
+    `safekeep tags list` says which tags there are to narrow by.
 
-    A label is free text the tool never reads: `snapshots list`, `snapshots show` and the restore
-    picker display it. A date says when a snapshot was taken and nothing about why, which is what a
-    label answers. A snapshot is one run, so a later backup cannot overwrite its label.
+    Each file copied is named as it is copied. A file unchanged since the previous snapshot becomes
+    a hard link into it rather than a copy, so it costs no space and is not named.
+
+    A label is free text that `snapshots list` and `snapshots show` print beside the snapshot, and
+    that a restore shows when it lists snapshots to choose from. A date says when a snapshot was
+    taken and nothing about why, which is what a label answers.
     """
     config_path, config, warnings = loaded(ctx)
     request = BackupRequest(tag=tag or [], source=(source or []) + (group or []), label=label, dry_run=dry_run)
@@ -289,11 +298,15 @@ snapshots_app = typer.Typer(
     cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
-    help='What is at the destination, and what each snapshot holds.',
+    help="""What is at the destination, and what each snapshot holds.
+
+    A snapshot is one backup run: a directory at the destination named for the second the run
+    started, holding the copied files and a manifest that records what they are.
+    """,
     epilog=examples(
-        ('safekeep snapshots list', 'what is on the destination already'),
-        ('safekeep snapshots show 2026-08-13', 'what that day captured'),
-        ('safekeep snapshots show 2026-08-13 --source ~/.ssh', 'the files it holds for one source'),
+        ('safekeep snapshots list', 'the snapshots at the destination, newest first'),
+        ('safekeep snapshots show 2026-08-13', "that day's last run, for a date snapshots list shows"),
+        ('safekeep snapshots show 2026-08-13 --source ~/.ssh', 'the files that run holds for one source'),
     ),
 )
 app.add_typer(snapshots_app, name='snapshots', rich_help_panel='Read')
@@ -309,8 +322,10 @@ app.add_typer(snapshots_app, name='snapshots', rich_help_panel='Read')
 def snapshots_list(ctx: typer.Context, as_json: JsonOption = False) -> None:
     """Every snapshot at the destination, newest first.
 
-    A snapshot missing its manifest, the record of what it holds and the modes to restore, is listed
-    and marked: safekeep cannot restore it.
+    Each row is one backup run: its name, size, files, sources, the machine it ran on and its label.
+    A run narrowed by `--tag` or `--source` holds fewer sources than the runs beside it. A snapshot
+    missing its manifest, the record of what it holds and the modes to restore, is listed and marked,
+    because safekeep cannot restore it.
     """
     config_path, config, _ = loaded(ctx)
     show_snapshot_list(destination(config), config_path, as_json)
@@ -321,8 +336,9 @@ def snapshots_list(ctx: typer.Context, as_json: JsonOption = False) -> None:
 @snapshots_app.command(
     'show',
     epilog=examples(
-        ('safekeep snapshots show 2026-08-13', "that day's last run, for a date from snapshots list"),
-        ('safekeep snapshots show 2026-08-13 --source ~/.ssh', 'the files it holds for one source'),
+        ('safekeep snapshots show 2026-08-13', "that day's last run, for a date snapshots list shows"),
+        ('safekeep snapshots show 2026-08-13T17-04-32', 'one run, by its full name'),
+        ('safekeep snapshots show 2026-08-13 --source ~/.ssh', 'the files that run holds for one source'),
     ),
 )
 def snapshots_show(
@@ -330,15 +346,15 @@ def snapshots_show(
     date: Annotated[
         str | None,
         typer.Argument(
-            metavar='DATE',
-            help='Required. A snapshot as `safekeep snapshots list` names it, or a date for the last run that day',
+            metavar='SNAPSHOT',
+            help="Required. A snapshot as `safekeep snapshots list` names it, or a date for that day's last run",
             show_default=False,
         ),
     ] = None,
-    source: Annotated[str | None, typer.Option('--source', metavar='PATH', help='The files that snapshot holds for one source')] = None,
+    source: Annotated[str | None, typer.Option('--source', metavar='PATH', help='The files the snapshot holds for one source')] = None,
     as_json: JsonOption = False,
 ) -> None:
-    """One snapshot: its sources, sizes and tags.
+    """One snapshot: the machine and config that wrote it, and its sources with their sizes and tags.
 
     Without `--json` an absent snapshot or source prints the reason and exits 0. With `--json` it
     exits 1, so a script can tell an answer from a miss.
@@ -346,7 +362,7 @@ def snapshots_show(
     config_path, config, _ = loaded(ctx)
     if date is None:
         choices = snapshot_choices(destination(config), config_path)
-        ctx.fail(f"Missing DATE: which snapshot to show. A date picks that day's last run.\n{choices}")
+        ctx.fail(f"Missing SNAPSHOT: which snapshot to show. A date picks that day's last run.\n{choices}")
     if source:
         show_snapshot_source_files(destination(config), date, source, config_path, as_json)
     else:
@@ -359,10 +375,10 @@ files_app = typer.Typer(
     cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
-    help='Every file the snapshots hold, one line each.',
+    help='Every file the snapshots hold, one line each, and which of them this machine lacks.',
     epilog=examples(
         ('safekeep files list --missing', 'what older snapshots hold that this machine lacks'),
-        ('safekeep files list --from 2026-08-04', 'everything one snapshot holds, flat'),
+        ('safekeep files list --from 2026-08-04', 'everything one snapshot holds, flat, for a date snapshots list shows'),
     ),
 )
 app.add_typer(files_app, name='files', rich_help_panel='Read')
@@ -372,15 +388,17 @@ app.add_typer(files_app, name='files', rich_help_panel='Read')
     'list',
     epilog=examples(
         ('safekeep files list --missing', 'what older snapshots hold that this machine lacks'),
-        ('safekeep files list --from 2026-08-04', 'everything one snapshot holds, flat'),
+        ('safekeep files list --from 2026-08-04', 'everything one snapshot holds, flat, for a date snapshots list shows'),
         ('safekeep files list --missing --json', "the same, with each stored copy's path"),
-        ('safekeep restore --to / --from <snapshot> --source ~/path/to/file', 'bring one back'),
+        ('safekeep restore --to / --from 2026-08-04 --source ~/.gitconfig', 'bring one back from the snapshot it is listed under'),
     ),
 )
 def files_list(
     ctx: typer.Context,
     missing: Annotated[bool, typer.Option('--missing', help='Only the files that are not on this machine')] = False,
-    from_date: Annotated[str | None, typer.Option('--from', metavar='DATE', help='Read that one snapshot instead of all of them')] = None,
+    from_date: Annotated[
+        str | None, typer.Option('--from', metavar='SNAPSHOT', help='Read that one snapshot instead of all of them')
+    ] = None,
     as_json: JsonOption = False,
 ) -> None:
     """Every file across every snapshot, from the newest holding it.
@@ -390,9 +408,9 @@ def files_list(
     this one lacks is only in the older snapshots, because each backup copies only what the machine
     running it has.
 
-    To bring one back, name the snapshot it is listed under and the file itself as the source. It is
-    backed up from then on only if a config entry covers its path. After the next backup run, its
-    line here names the newest snapshot if one does.
+    To bring one back, restore it with `--from` the snapshot it is listed under and `--source` the
+    file itself. A file brought back is backed up again only if a source in the config covers its
+    path. Once one does, the next backup run lists it under the newest snapshot.
     """
     config_path, config, _ = loaded(ctx)
     show_files(config, config_path, missing=missing, from_date=from_date, as_json=as_json)
@@ -404,32 +422,40 @@ tags_app = typer.Typer(
     cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
-    help="""The tags a restore can select on, and what each would bring back.
+    help="""The tags a restore can select by, and what each would bring back.
 
-    A tag lives in two places and reading either alone misleads: the config says which entries carry
-    it, and each snapshot carries a copy of what the config said that day. `--tag` selects on the
-    snapshot, so tagging an entry today does nothing for the snapshots that already exist. Both verbs
-    mark the difference.
+    A tag is a name given to sources in the config, such as `secrets`, and `restore --tag secrets`
+    restores every source carrying it. Each snapshot keeps a copy of the tags its config had that day,
+    and a restore selects on that copy, so tagging a source today does nothing for the snapshots that
+    already exist. Both verbs read the config and one snapshot together, and mark where they differ.
     """,
     epilog=examples(
-        ('safekeep tags list', 'every tag and what it would restore'),
-        ('safekeep tags show secrets', 'what that tag would bring back'),
-        ('safekeep tags list --from 2026-07-01', 'size against an older snapshot'),
+        ('safekeep tags list', 'every tag and what a restore by it would bring back'),
+        ('safekeep tags show secrets', 'the sources one tag covers, and the restore that brings them back'),
+        ('safekeep tags list --from 2026-07-01', 'the same, read from an older snapshot'),
     ),
 )
 app.add_typer(tags_app, name='tags', rich_help_panel='Read')
-SizeFromOption = Annotated[str | None, typer.Option('--from', metavar='DATE', help='Size against that snapshot instead of the newest')]
+TagsFromOption = Annotated[
+    str | None, typer.Option('--from', metavar='SNAPSHOT', help="Read that snapshot's tags and sizes instead of the newest's")
+]
 
 
 @tags_app.command(
     'list',
     epilog=examples(
-        ('safekeep tags list', 'every tag, sized against the newest snapshot'),
-        ('safekeep tags list --from 2026-07-01', 'sized against an older snapshot, for a date from snapshots list'),
+        ('safekeep tags list', 'every tag, read from the newest snapshot'),
+        ('safekeep tags list --from 2026-07-01', 'read from an older snapshot, for a date snapshots list shows'),
     ),
 )
-def tags_list(ctx: typer.Context, from_date: SizeFromOption = None, as_json: JsonOption = False) -> None:
-    """Every tag, the sources it covers, and what it would restore."""
+def tags_list(ctx: typer.Context, from_date: TagsFromOption = None, as_json: JsonOption = False) -> None:
+    """Every tag, the sources it covers, and what a restore by it would bring back.
+
+    A tag is a name given to sources in the config. A restore by tag selects on the tags a snapshot
+    recorded, so each tag is read from one snapshot, the newest unless `--from` names another. Its
+    size is what a restore by that tag would bring back from it. A tag the snapshot lacks reads
+    "restores nothing from this snapshot".
+    """
     config_path, config, _ = loaded(ctx)
     show_tag_list(config, config_path, from_date=from_date, as_json=as_json)
 
@@ -437,7 +463,8 @@ def tags_list(ctx: typer.Context, from_date: SizeFromOption = None, as_json: Jso
 @tags_app.command(
     'show',
     epilog=examples(
-        ('safekeep tags show secrets', 'what restore --tag secrets would bring back, for a tag from tags list'),
+        ('safekeep tags show secrets', 'what restore --tag secrets would bring back, for a tag tags list shows'),
+        ('safekeep tags show secrets --from 2026-07-01', 'the same, from an older snapshot'),
     ),
 )
 def tags_show(
@@ -445,10 +472,15 @@ def tags_show(
     name: Annotated[
         str | None, typer.Argument(metavar='NAME', help='Required. A tag as `safekeep tags list` names it', show_default=False)
     ] = None,
-    from_date: SizeFromOption = None,
+    from_date: TagsFromOption = None,
     as_json: JsonOption = False,
 ) -> None:
-    """One tag, source by source, and the restore that brings it back."""
+    """One tag, source by source, and the restore that brings it back.
+
+    A tag is a name given to sources in the config. Each source shows what the snapshot holds for it,
+    or why a restore by this tag would skip it. The restore printed beneath runs as printed, into a
+    scratch directory; where the snapshot holds the files but not the tag, it restores them by path.
+    """
     config_path, config, _ = loaded(ctx)
     if name is None:
         index, _, _ = resolve_tag_index(config, config_path, from_date)
@@ -465,9 +497,9 @@ def tags_show(
     no_args_is_help=True,
     rich_help_panel='Restore',
     epilog=examples(
-        (f'safekeep restore --to {REHEARSE_INTO} --all', 'rehearse first, always'),
-        ('safekeep restore --to / --tag secrets', 'restore one tag for real'),
-        ('safekeep restore --to / --from 2026-07-01 --all', 'restore an older snapshot'),
+        (f'safekeep restore --to {REHEARSE_INTO} --all', 'rehearse first: the newest snapshot, into a scratch directory'),
+        ('safekeep restore --to / --tag secrets', 'restore the sources tagged secrets, for real'),
+        ('safekeep restore --to / --from 2026-07-01 --all', 'restore an older snapshot, for a date snapshots list shows'),
         ('safekeep restore --to / --from 2026-07-01 --source ~/.ssh/config', 'bring back one file'),
     ),
 )
@@ -483,7 +515,12 @@ def restore(
         ),
     ] = None,
     from_date: Annotated[
-        str | None, typer.Option('--from', metavar='DATE', help='Snapshot to restore from (default: pick, else newest)')
+        str | None,
+        typer.Option(
+            '--from',
+            metavar='SNAPSHOT',
+            help="The snapshot to restore from, as `snapshots list` names it, or a date for that day's last run",
+        ),
     ] = None,
     all_sources: Annotated[bool, typer.Option('--all', help='Every source in the snapshot', rich_help_panel='Selection')] = False,
     source: Annotated[
@@ -510,15 +547,20 @@ def restore(
 ) -> None:
     """Restore sources from a snapshot.
 
-    Selection is required and never inferred, so pass `--all`, `--source` or `--tag`. A source is one
-    config entry: a path, or one repo's untracked and ignored files. A full path to something inside
-    a source restores that alone, and `safekeep files list` prints those paths, one line per file. A
-    tag selects on the snapshot, which carries the tags its config had that day, and
-    `safekeep tags show <name>` says whether one selects anything.
+    Selection is required and never inferred: `--all`, `--source` or `--tag`. A source is one entry
+    in the config: a path, or one git repo's untracked and ignored files. `--source` also takes the
+    full path of a file or directory inside a source, which `safekeep files list` prints. A tag
+    selects on the tags the snapshot recorded, and `safekeep tags show NAME` says what it selects.
 
-    Every file is named as it is written, marked `+` for new and `~` for replaced. `backup` keeps the
-    file it replaced beside it as `<name>.pre-restore`. `ask` names each existing file and waits for a
-    decision, `[y]es [N]o [a]ll [k]eep all [q]uit`, and keeps no copies, since you were asked.
+    Without `--from` the restore reads the newest snapshot. On a terminal with nothing selected, it
+    lists the snapshots to choose from instead, then the sources in the one chosen. Files from under
+    the home that took the snapshot land under this machine's home.
+
+    Every file is named as it is written, `+` for new and `~` for replaced. `--on-conflict` decides
+    what happens to a file already at the target. `backup` replaces it and keeps the old one beside
+    it, with `.pre-restore` added to its name. `overwrite` replaces it and keeps nothing. `skip`
+    leaves it. `newer` replaces it only where the snapshot's copy is newer. `ask` names each one and
+    waits for `[y]es [N]o [a]ll [k]eep all [q]uit`.
     """
     sources = (source or []) + (group or [])
     # Resolved before the --to check: with several configs and no -c, a rehearsal printed first would fail as printed.
@@ -547,15 +589,17 @@ config_app = typer.Typer(
     cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
-    help="""Inspect and create config files.
+    help="""Write, read and change configs.
 
-    Each lives at `~/.config/safekeep/<name>.toml`. The annotated example is the key reference: it
-    explains every key inline.
+    A config names a destination, `back_up_to`, and the sources to copy there. Each has a name, and
+    `-c NAME` picks one when there are several. `safekeep config show` names the file in use, and
+    `safekeep config example` explains every key.
     """,
     epilog=examples(
-        ('safekeep config init', 'write ~/.config/safekeep/default.toml'),
-        ('safekeep config init work', 'a second destination, used with -c work'),
-        ('safekeep config show', 'what the config resolves to'),
+        ('safekeep config init', 'a first config, named default'),
+        ('safekeep config init work', 'a second destination, which -c work then reads'),
+        ('safekeep config show', 'the config in use, and which file it is'),
+        ('safekeep config edit', 'change it, and have it checked when the editor closes'),
     ),
 )
 app.add_typer(config_app, name='config', rich_help_panel='Manage')
@@ -569,14 +613,27 @@ app.add_typer(config_app, name='config', rich_help_panel='Manage')
     ),
 )
 def config_show(ctx: typer.Context, as_json: JsonOption = False) -> None:
-    """Display the resolved config and exit."""
+    """The config in use: which file it is, its destination and sources, and any warnings about it.
+
+    Paths are shown with `~` and variables expanded, as a backup reads them.
+    """
     config_path, config, warnings = loaded(ctx)
     show_config(config_path, config, warnings, as_json)
 
 
-@config_app.command('edit', epilog=examples(('safekeep config edit', 'change the config, then see what the edit changed')))
+@config_app.command(
+    'edit',
+    epilog=examples(
+        ('safekeep config edit', 'change the config, and have it checked when the editor closes'),
+        ('safekeep -c work config edit', 'another config, by name'),
+    ),
+)
 def config_edit(ctx: typer.Context) -> None:
-    """Open the config in $VISUAL or $EDITOR, then check it."""
+    """Open the config in $VISUAL or $EDITOR, then check it.
+
+    After the editor closes, the config is read again. An error or a warning in it is named then,
+    rather than at the next backup, and a clean read counts its paths and git repos.
+    """
     # Resolved but not loaded: a config that fails to load is the main reason to open one, and
     # load_config exits before the editor could fix it.
     edit_config(config_file(ctx))
@@ -585,15 +642,22 @@ def config_edit(ctx: typer.Context) -> None:
 @config_app.command(
     'init',
     epilog=examples(
-        ('safekeep config init', 'a starter config named default'),
-        ('safekeep config init work', 'a second config; every command then names one with -c'),
+        ('safekeep config init', 'a first config, named default'),
+        ('safekeep config init work', 'a second config, after which every command names one with -c'),
+        ('safekeep config init /mnt/backup/safekeep.toml', 'a config kept at a path of its own, read with -c and that path'),
     ),
 )
 def config_init(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(metavar='NAME|PATH', help='A name, or a .toml file to write. `-c` overrides it')] = 'default',
 ) -> None:
-    """Write a starter config."""
+    """Write the annotated example as a new config.
+
+    A name writes it beside the other configs, where `-c NAME` finds it. A path to a `.toml` file
+    writes it there instead, and `-c` then takes that path. An existing config is never overwritten.
+    The file it writes names an example destination and sources, to be changed with
+    `safekeep config edit`.
+    """
     init_config(invocation(ctx).config or name)
 
 

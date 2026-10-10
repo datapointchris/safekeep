@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 import tomli_w
+import typer.main
+from typer.testing import CliRunner
 
 import safekeep
 
@@ -149,6 +151,34 @@ def test_help_lists_every_public_command(tmp_path):
         assert command in result.stdout
 
 
+def help_examples():
+    """Every invocation a help screen offers as an example, from every command's epilog."""
+    from safekeep.main import app
+
+    def epilogs(command):
+        yield command.epilog or ''
+        for child in getattr(command, 'commands', {}).values():
+            yield from epilogs(child)
+
+    found = [
+        shlex.split(example) for epilog in epilogs(typer.main.get_command(app)) for example in re.findall(r'`(safekeep [^`]+)`', epilog)
+    ]
+    return [example[1:] for example in found]
+
+
+def test_every_help_example_names_commands_and_flags_safekeep_has():
+    """A trailing -h answers only once the line parses, so an unknown command or flag still fails."""
+    runner = CliRunner()
+    from safekeep.main import app
+
+    assert runner.invoke(app, ['restore', '--to', '/', '--frm', 'x', '-h']).exit_code == 2, 'a bad flag must fail through the -h'
+    examples = help_examples()
+    assert len(examples) > 20
+    for example in examples:
+        result = runner.invoke(app, [*example, '-h'])
+        assert result.exit_code == 0, f'safekeep {shlex.join(example)}: {result.output}'
+
+
 def test_restore_help_works_without_the_option_it_documents(tmp_path):
     """Every restore needs --to, and the screen that explains it answers without one."""
     result = run_safekeep('restore', '--help')
@@ -240,7 +270,7 @@ def test_snapshots_show_and_tags_show_with_no_argument_list_what_they_could_take
 
     snapshots = run_safekeep('--config', str(config_path), 'snapshots', 'show')
     assert snapshots.returncode == 2
-    assert 'Missing DATE' in snapshots.stderr
+    assert 'Missing SNAPSHOT' in snapshots.stderr
     assert f'{snapshot}  (newest)' in snapshots.stderr
 
     tags = run_safekeep('--config', str(config_path), 'tags', 'show')
@@ -1072,12 +1102,13 @@ def test_a_snapshot_says_whether_it_shares_storage(tmp_path, source_tree):
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     run_safekeep('--config', str(config_path), 'backup', 'run')
     previous = age_todays_snapshot(dest)
-    assert 'full copy' in run_safekeep('--config', str(config_path), 'snapshots', 'show', previous.name).stdout
+    first = run_safekeep('--config', str(config_path), 'snapshots', 'show', previous.name).stdout
+    assert 'unchanged files: copied in full, linked to no earlier snapshot' in first
 
     run_safekeep('--config', str(config_path), 'backup', 'run')
     current = next(d for d in dest.iterdir() if d.is_dir() and d != previous)
     shown = plain(run_safekeep('--config', str(config_path), 'snapshots', 'show', current.name).stdout)
-    assert f'shares inodes with {previous.name}' in shown
+    assert f'unchanged files: hard links into {previous.name}' in shown
 
 
 def test_a_second_run_the_same_day_links_against_the_first(tmp_path, source_tree):
@@ -1902,7 +1933,7 @@ def test_restore_dry_run_reports_the_modes_it_would_set_not_zero(tmp_path, sourc
     are the three deviations the manifest records — the rest take the defaults."""
     restore, _ = backup_and_restore(tmp_path, source_tree, '--all', '--dry-run')
     assert restore.returncode == 0, restore.stderr
-    assert re.search(r'would set modes on \d+ paths \(3 recorded deviations\)', plain(restore.stdout))
+    assert re.search(r'would set modes on \d+ paths \(3 as the snapshot recorded them, \d+ at the default 0644 or 0755\)', restore.stdout)
 
 
 def test_restore_by_tag_selects_only_the_groups_carrying_it(tmp_path, source_tree):
@@ -1921,6 +1952,26 @@ def test_restore_by_tag_takes_every_group_carrying_it(tmp_path, source_tree):
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
     assert (target / safekeep.snapshot_rel(source_tree / 'solo.conf')).exists()
     assert (target / safekeep.snapshot_rel(source_tree / 'linked.conf')).exists()
+
+
+def test_a_config_holding_only_the_destination_lists_and_restores_every_snapshot(tmp_path, source_tree):
+    """The new machine with only the drive: its config names no source, and the manifests carry the rest."""
+    dest = tmp_path / 'dest'
+    run_safekeep('--config', str(matrix_config(tmp_path, dest, source_tree)), 'backup', 'run')
+    bare = tmp_path / 'bare'
+    bare.mkdir()
+    only_dest = write_config(bare, dest)
+
+    listed = run_safekeep('--config', str(only_dest), 'snapshots', 'list')
+    assert listed.returncode == 0, listed.stderr
+    assert latest_snapshot(dest).name in listed.stdout
+
+    target = tmp_path / 'target'
+    restore = run_safekeep('--config', str(only_dest), 'restore', '--to', str(target), '--tag', 'secrets')
+    assert restore.returncode == 0, restore.stderr
+    solo = target / safekeep.snapshot_rel(source_tree / 'solo.conf')
+    assert solo.read_text() == 'solo\n'
+    assert stat.S_IMODE(solo.stat().st_mode) == 0o600
 
 
 def test_restore_by_group_matches_the_source_path(tmp_path, source_tree):
