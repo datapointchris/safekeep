@@ -260,7 +260,10 @@ def backup_run(
     source: Annotated[
         list[str] | None,
         typer.Option(
-            '--source', metavar='PATH', help='Only the sources whose path contains PATH (repeatable)', rich_help_panel='Selection'
+            '--source',
+            metavar='PATH',
+            help='Only the source at PATH, or else every source whose path contains PATH (repeatable)',
+            rich_help_panel='Selection',
         ),
     ] = None,
     group: GroupAlias = None,
@@ -521,7 +524,7 @@ def restore(
         typer.Option(
             '--source',
             metavar='PATH',
-            help='Sources whose path contains PATH, or one file or directory inside one (repeatable)',
+            help='The source at PATH, or else every source whose path contains PATH, or one file or directory inside one (repeatable)',
             rich_help_panel='Selection',
         ),
     ] = None,

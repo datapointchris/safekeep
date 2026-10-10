@@ -1733,7 +1733,8 @@ def select_groups(manifest, request: RestoreRequest):
     """Resolve which groups to restore from flags, or None if selection is interactive.
 
     A --source is matched against each source both as recorded and as this machine names it, so
-    a path copied out of `files list` still matches a snapshot taken under another home.
+    a path copied out of `files list` still matches a snapshot taken under another home. One
+    naming a source exactly selects that source alone: `~/code/app` is not `~/code/app-api`.
     """
     groups = manifest.get('groups', [])
     if request.all:
@@ -1745,10 +1746,11 @@ def select_groups(manifest, request: RestoreRequest):
     home_then = manifest.get('home')
     home_now = str(Path.home())
     needles = [normalized_needle(needle) for needle in request.source]
+    named = [(group, source_names(group['source'], home_then, home_now)) for group in groups]
+    exact = {needle for needle in needles if any(needle in names for _, names in named)}
     selected = []
-    for group in groups:
-        names = source_names(group['source'], home_then, home_now)
-        matched_source = any(needle in name for needle in needles for name in names)
+    for group, names in named:
+        matched_source = any(needle in names if needle in exact else any(needle in name for name in names) for needle in needles)
         matched_tag = any(tag in group.get('tags', []) for tag in request.tag)
         if matched_source or matched_tag:
             selected.append(group)
@@ -2430,20 +2432,27 @@ def sources_held_before(dest, snapshot_dir, manifest):
     return found
 
 
-def select_sources(entries, request: BackupRequest):
+def select_sources(config, entries, request: BackupRequest):
     """The entries a backup run covers: every one, or those matching --tag/--source.
 
     Bare `backup` already means everything, so these narrow rather than enable and there is no
     --all to forget. That is the opposite of restore, where selection is required and never
     inferred -- a backup that silently covered less than asked is the failure to design out,
-    and a restore that silently covered more.
+    and a restore that silently covered more. A --source naming any entry in the config exactly
+    selects that entry alone, as it does in a restore.
     """
     if not request.tag and not request.source:
         return entries
+    every_path = {str(path) for _, path, _ in config_entries(config)}
+    exact = {needle for needle in request.source if normalized_needle(needle) in every_path}
+
+    def selects(needle, path):
+        return normalized_needle(needle) == str(path) if needle in exact else needle in str(path)
+
     return [
         (path, tags)
         for path, tags in entries
-        if any(tag in tags for tag in request.tag) or any(needle in str(path) for needle in request.source)
+        if any(tag in tags for tag in request.tag) or any(selects(needle, path) for needle in request.source)
     ]
 
 
@@ -2457,7 +2466,7 @@ def narrowing(config, request: BackupRequest):
         return None
     repos, back_up_untracked, ignored_patterns = repo_entries(config)
     covered = normalize_entries(config.get('back_up_paths', [])) + (repos if back_up_untracked or ignored_patterns else [])
-    if len(select_sources(covered, request)) == len(covered):
+    if len(select_sources(config, covered, request)) == len(covered):
         return None
     return {'tags': list(request.tag), 'sources': list(request.source)}
 
@@ -2605,7 +2614,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
     if request.label is not None:
         manifest['label'] = request.label.strip() or None
 
-    entries = select_sources(normalize_entries(config.get('back_up_paths', [])), request)
+    entries = select_sources(config, normalize_entries(config.get('back_up_paths', [])), request)
     if entries:
         print(f'\n{bold("paths:")}')
         present = []
@@ -2623,7 +2632,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
         print(f'  {copy_tally(request.dry_run, copied, plural(len(present), "source"))}')
 
     repos, back_up_untracked, ignored_patterns = repo_entries(config)
-    repos = select_sources(repos, request)
+    repos = select_sources(config, repos, request)
     if repos and back_up_untracked:
         print(f'\n{bold("untracked:")}')
         for repo_path, tags in repos:

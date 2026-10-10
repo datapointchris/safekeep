@@ -222,7 +222,7 @@ A snapshot with no manifest cannot be restored by safekeep — it says so and po
 ```bash
 safekeep backup run                     # everything the config lists
 safekeep backup run --tag secrets       # only the entries carrying that tag
-safekeep backup run --source ~/notes    # only the entries whose path contains that string
+safekeep backup run --source ~/.ssh     # only the entry at that path, or else those containing it
 safekeep backup run --label 'before the wsl move'   # say why this one was taken
 ```
 
@@ -335,6 +335,10 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
 `--to` is required. `--to /` is a real restore; `--to ~/.cache/safekeep/rehearsal` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed. That is the directory every printed rehearsal names, under `$XDG_CACHE_HOME` when it is set. It is a cache because deleting it costs nothing. It is the user's own because a fixed path under `/tmp` is shared with every account on the machine, which could create it first. A `~` in `--to` is expanded even where the shell left it alone, as zsh does after `--to=`.
 
 **A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
+
+**`--source` selects the source at that path, and otherwise every source whose path contains it.**
+`--source ~/code/app` is that repo alone, and leaves `~/code/app-api` out. `--source app` matches no
+source exactly, so it selects both. `backup run --source` follows the same rule against the config.
 
 **`--source` also takes a full path to a file or directory inside a source, and restores that path
 alone.** That is the form `safekeep files list` prints. The path is matched both as this machine

@@ -2233,6 +2233,40 @@ def test_a_narrowed_snapshot_named_by_from_is_restored_without_offering_the_rest
     assert 'it lacks' not in restored.stdout
 
 
+def prefixed_sources(tmp_path, source_tree):
+    """A config holding notes and notes-old, whose path the first one's is a prefix of."""
+    (source_tree / 'notes-old').mkdir()
+    (source_tree / 'notes-old' / 'kept.md').write_text('older\n')
+    dest = tmp_path / 'dest'
+    return dest, write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes', source_tree / 'notes-old'))
+
+
+def test_a_backup_source_naming_an_entry_exactly_leaves_out_the_entry_it_prefixes(tmp_path, source_tree):
+    dest, config_path = prefixed_sources(tmp_path, source_tree)
+    run = run_safekeep('--config', str(config_path), 'backup', 'run', '--source', str(source_tree / 'notes'))
+    assert run.returncode == 0, run.stderr
+    assert sources_of(latest_snapshot(dest)) == {str(source_tree / 'notes')}
+
+
+def test_the_restore_of_what_a_narrowed_snapshot_lacks_leaves_out_a_source_its_path_prefixes(tmp_path, source_tree):
+    """The narrowed run took notes-old, so the printed --source for notes must not select notes-old
+    from the older snapshot and put its older copy back."""
+    dest, config_path = prefixed_sources(tmp_path, source_tree)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    age_todays_snapshot(dest)
+    # A different size, or rsync's quick check reads a change inside the same second as no change.
+    (source_tree / 'notes-old' / 'kept.md').write_text('the newer copy\n')
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--source', str(source_tree / 'notes-old'))
+
+    target = tmp_path / 'target'
+    restored = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
+    assert restored.returncode == 0, restored.stderr
+    rest = printed_after('the newest snapshot holding it:', restored.stdout)
+    assert run_safekeep(*rest).returncode == 0
+    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
+    assert (target / safekeep.snapshot_rel(source_tree / 'notes-old') / 'kept.md').read_text() == 'the newer copy\n'
+
+
 @pytest.mark.parametrize('selection', ['tag', 'source'])
 def test_a_selection_a_narrowed_run_left_out_prints_the_restore_from_the_snapshot_holding_it(tmp_path, source_tree, selection):
     """A run narrowed by --tag leaves the newest snapshot without the other sources. The miss names
