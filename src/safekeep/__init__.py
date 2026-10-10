@@ -1843,7 +1843,7 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
         # rsync has no question left to answer that this list does not.
         for name in sorted(by_name):
             report(name)
-        report_source_totals(transferred, files, declined)
+        report_source_totals(transferred, files, declined, args.dry_run)
         return entries
 
     try:
@@ -1852,7 +1852,7 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
         if listing:
             os.unlink(listing)
 
-    report_source_totals(transferred, files, declined)
+    report_source_totals(transferred, files, declined, args.dry_run)
     return entries
 
 
@@ -1863,7 +1863,7 @@ def write_path_list(names):
         return tmp.name
 
 
-def report_source_totals(transferred, files, declined):
+def report_source_totals(transferred, files, declined, dry_run):
     """What the source's rsync did, in the four outcomes a file can have.
 
     Unchanged is the one worth printing even when it is everything: a restore that names no
@@ -1871,11 +1871,12 @@ def report_source_totals(transferred, files, declined):
     """
     written = [entry for entry in transferred if entry is not None]
     created = sum(1 for entry in written if not entry['existed'])
+    restored, replaced = ('would be restored', 'would be replaced') if dry_run else ('restored', 'replaced')
     parts = []
     if created:
-        parts.append(green(plural(created, 'file') + ' restored'))
+        parts.append(green(f'{plural(created, "file")} {restored}'))
     if len(written) - created:
-        parts.append(yellow(f'{len(written) - created} replaced'))
+        parts.append(yellow(f'{len(written) - created} {replaced}'))
     if declined:
         parts.append(f'{len(declined)} kept')
     if len(files) - len(written):
@@ -2072,7 +2073,13 @@ def do_restore(config, config_path, args):
     symlink_paths = ['/' + rel for rel in symlinks]
     restored_symlinks = paths_under_any([row['source'] for row in restored], symlink_paths)
     if restored_symlinks and not args.skip_symlinked:
-        print(f'\n{yellow("note:")} {len(restored_symlinks)} restored paths were symlinks when backed up, and are now real files:')
+        one = len(restored_symlinks) == 1
+        was = 'was a symlink' if one else 'were symlinks'
+        if args.dry_run:
+            now = 'would be a real file' if one else 'would be real files'
+        else:
+            now = 'is now a real file' if one else 'are now real files'
+        print(f'\n{yellow("note:")} {plural(len(restored_symlinks), "restored path")} {was} when backed up, and {now}:')
         for abs_path in restored_symlinks[:10]:
             print(f'  {abs_path} -> {symlinks[abs_path.lstrip("/")]}')
         if len(restored_symlinks) > 10:
@@ -2081,14 +2088,15 @@ def do_restore(config, config_path, args):
 
     linked_above = sorted({link for row in restored for link in symlinked_ancestors(row, symlink_paths)})
     if linked_above:
-        were = 'directory that was a symlink' if len(linked_above) == 1 else 'directories that were symlinks'
-        print(f'\n{yellow("note:")} restored paths sit inside {len(linked_above)} {were} when backed up:')
+        were = 'a directory above these paths was a symlink' if len(linked_above) == 1 else 'directories above these paths were symlinks'
+        wrote, became = ('would write', 'would become') if args.dry_run else ('wrote', 'is now')
+        print(f'\n{yellow("note:")} {were} when backed up:')
         for abs_path in linked_above[:10]:
             print(f'  {abs_path} -> {symlinks[abs_path.lstrip("/")]}')
         if len(linked_above) > 10:
             print(f'  ... and {len(linked_above) - 10} more')
-        print('  where that link still exists here, the restore wrote through it into what it points at')
-        print(f'  where it does not, it is now a real directory — use {cyan("--skip-symlinked")} to leave these paths alone')
+        print(f'  where that link still exists here, the restore {wrote} through it into what it points at')
+        print(f'  where it does not, it {became} a real directory — use {cyan("--skip-symlinked")} to leave these paths alone')
 
     verb = yellow('would restore') if args.dry_run else green('restored')
     print(f'\n{bold("safekeep:")} {verb} {bold(selection_count(restored))} to {cyan(args.to)}')

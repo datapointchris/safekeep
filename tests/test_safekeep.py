@@ -1739,7 +1739,7 @@ def test_restore_skips_a_group_missing_from_the_snapshot(tmp_path, source_tree):
 
 def test_restore_reports_dereferenced_symlinks(tmp_path, source_tree):
     restore, target = backup_and_restore(tmp_path, source_tree, '--all')
-    assert 'were symlinks when backed up' in restore.stdout
+    assert '1 restored path was a symlink when backed up, and is now a real file' in plain(restore.stdout)
     assert (target / safekeep.snapshot_rel(source_tree / 'linked.conf')).is_file()
 
 
@@ -1789,7 +1789,7 @@ def test_restoring_a_file_from_under_a_directory_that_was_a_symlink_names_the_li
     assert restore.returncode == 0, restore.stderr
     assert (target / safekeep.snapshot_rel(init)).read_text() == 'init\n'
     out = plain(restore.stdout)
-    assert 'sit inside 1 directory that was a symlink' in out
+    assert 'a directory above these paths was a symlink' in out
     assert f'{init.parent} -> {tmp_path / "shared" / "nvim"}' in out
 
 
@@ -2075,7 +2075,10 @@ def test_restore_dry_run_names_the_files_it_would_write(tmp_path, source_tree):
     parent cannot be created without writing. The file list is what makes it a rehearsal."""
     restore, target = backup_and_restore(tmp_path, source_tree, '--all', '--dry-run')
     assert restore.returncode == 0, restore.stderr
-    assert '+ plain.md' in plain(restore.stdout)
+    out = plain(restore.stdout)
+    assert '+ plain.md' in out
+    assert 'would be restored' in out
+    assert not re.search(r'\d+ files? restored', out), 'nothing was written, so no total may say it was'
     assert not target.exists()
 
 
