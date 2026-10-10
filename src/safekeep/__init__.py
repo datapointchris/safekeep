@@ -1340,20 +1340,26 @@ def show_tag(config, config_path, name: str, from_date: str | None, as_json: boo
         return
 
     # Pinned with --from, so the command restores the snapshot sized here even after a newer run.
-    command = safekeep_for(config_path)
-    rehearse = f'{command} restore --to {shell_path(str(REHEARSAL_ROOT))} --from {snapshot_dir.name}'
+    by_tag = rehearsal_request(tags=[name])
     if selected:
-        print(f'\n  restore it: {cyan(f"{rehearse} --tag {shlex.quote(name)}")}')
+        print(f'\n  restore it: {cyan(restore_command(by_tag, config_path, from_snapshot=snapshot_dir.name))}')
         return
+    # A run narrowed by --tag or --source leaves this snapshot without sources an older one tags.
+    other = newest_snapshot_selecting(dest, by_tag, besides=snapshot_dir.name)
+    if other:
+        from_other = restore_command(by_tag, config_path, from_snapshot=other)
+        instead = f'restore by the tag from the newest snapshot that carries it: {cyan(from_other)}'
+    else:
+        instead = f'take a snapshot that tags them: {cyan(f"{safekeep_for(config_path)} backup run")}'
     held = [row for row in rows if row['files'] is not None]
     if not held:
         print(f'\n  none of its sources are in {cyan(snapshot_dir.name)}')
-        print(f'  take a snapshot that holds them: {cyan(f"{command} backup run")}')
+        print(f'  {instead}')
         return
-    sources = ' '.join(f'--source {shell_path(row["source"])}' for row in held)
+    by_path = rehearsal_request(sources=[row['source'] for row in held])
     print(f'\n  {cyan(snapshot_dir.name)} holds these sources without the tag, so a restore by {green(name)} selects nothing in it.')
-    print(f'  restore them by path: {cyan(f"{rehearse} {sources}")}')
-    print(f'  or take a snapshot that tags them: {cyan(f"{command} backup run")}')
+    print(f'  restore them by path: {cyan(restore_command(by_path, config_path, from_snapshot=snapshot_dir.name))}')
+    print(f'  or {instead}')
 
 
 def restorable_snapshots(dest, date, config_path):
@@ -2102,22 +2108,37 @@ def apply_modes(manifest, entries, dry_run):
 def restore_command(request: RestoreRequest, config_path, from_snapshot=None):
     """The restore `request` describes, as a command line that runs as printed."""
     head = safekeep_for(config_path) + (' --no-input' if request.no_input else '') + ' restore'
+    # Each word is quoted alone, because shlex.join would quote a tilde and a quoted one never expands.
     snapshot = from_snapshot or request.from_date
-    tail = ['--from', snapshot] if snapshot else []
+    words = ['--to', shell_path(request.to)] + (['--from', shlex.quote(snapshot)] if snapshot else [])
     selection = (
         (['--all'] if request.all else [])
-        + [w for s in request.source for w in ('--source', s)]
-        + [w for t in request.tag for w in ('--tag', t)]
+        + [w for s in request.source for w in ('--source', shell_path(s))]
+        + [w for t in request.tag for w in ('--tag', shlex.quote(t))]
     )
-    tail += selection or ['--all']
+    words += selection or ['--all']
     if request.on_conflict != ConflictPolicy.BACKUP:
-        tail += ['--on-conflict', request.on_conflict.value]
+        words += ['--on-conflict', request.on_conflict.value]
     if request.skip_symlinked:
-        tail.append('--skip-symlinked')
+        words.append('--skip-symlinked')
     if request.dry_run:
-        tail.append('-n')
-    # Joined apart from the rest because shlex.join would quote the tilde, and a quoted one never expands.
-    return f'{head} --to {shell_path(request.to)} {shlex.join(tail)}'
+        words.append('-n')
+    return ' '.join([head, *words])
+
+
+def rehearsal_request(tags=(), sources=()):
+    """A restore into the rehearsal directory, for a command printed beside a listing."""
+    return RestoreRequest(
+        to=str(REHEARSAL_ROOT),
+        from_date=None,
+        all=False,
+        source=list(sources),
+        tag=list(tags),
+        on_conflict=ConflictPolicy.BACKUP,
+        skip_symlinked=False,
+        dry_run=False,
+        no_input=False,
+    )
 
 
 def selected_rows(snapshot_dir, manifest, request: RestoreRequest):

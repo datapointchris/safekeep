@@ -2003,10 +2003,8 @@ def test_restore_by_unknown_tag_says_which_tags_the_snapshot_has(tmp_path, sourc
     assert compare.returncode == 0, compare.stderr
 
 
-@pytest.mark.parametrize('selection', ['tag', 'source'])
-def test_a_selection_a_narrowed_run_left_out_prints_the_restore_from_the_snapshot_holding_it(tmp_path, source_tree, selection):
-    """A run narrowed by --tag leaves the newest snapshot without the other sources. The miss names
-    the older snapshot that holds them, in a restore that runs as printed."""
+def narrowed_after_full(tmp_path, source_tree):
+    """A full backup, then one narrowed to the secrets: the newest snapshot holds solo.conf alone."""
     dest = tmp_path / 'dest'
     config_path = write_config(
         tmp_path,
@@ -2019,6 +2017,14 @@ def test_a_selection_a_narrowed_run_left_out_prints_the_restore_from_the_snapsho
     run_safekeep('--config', str(config_path), 'backup', 'run')
     full = age_todays_snapshot(dest).name
     run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'secrets')
+    return config_path, full
+
+
+@pytest.mark.parametrize('selection', ['tag', 'source'])
+def test_a_selection_a_narrowed_run_left_out_prints_the_restore_from_the_snapshot_holding_it(tmp_path, source_tree, selection):
+    """A run narrowed by --tag leaves the newest snapshot without the other sources. The miss names
+    the older snapshot that holds them, in a restore that runs as printed."""
+    config_path, full = narrowed_after_full(tmp_path, source_tree)
 
     target = tmp_path / 'target'
     chosen = ['--tag', 'notes'] if selection == 'tag' else ['--source', str(source_tree / 'notes')]
@@ -2030,6 +2036,17 @@ def test_a_selection_a_narrowed_run_left_out_prints_the_restore_from_the_snapsho
     restored = run_safekeep(*retry)
     assert restored.returncode == 0, restored.stderr
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').read_text() == 'plain\n'
+
+
+def test_tags_show_offers_the_older_snapshot_that_carries_a_tag_a_narrowed_run_left_out(tmp_path, source_tree):
+    """Taking another snapshot is the advice only when no snapshot carries the tag."""
+    config_path, full = narrowed_after_full(tmp_path, source_tree)
+
+    shown = run_safekeep('--config', str(config_path), 'tags', 'show', 'notes')
+    assert 'backup run' not in shown.stdout
+    restore = printed_after('restore by the tag from the newest snapshot that carries it:', shown.stdout)
+    assert restore[restore.index('--from') + 1] == full
+    assert run_safekeep(*restore, '-n').returncode == 0
 
 
 def test_restore_dry_run_writes_nothing(tmp_path, source_tree):
