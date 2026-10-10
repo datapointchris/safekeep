@@ -14,6 +14,7 @@ import json
 import os
 import pty
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -23,7 +24,6 @@ from pathlib import Path
 
 import pytest
 import tomli_w
-from pyselfupdate import Result
 
 import safekeep
 
@@ -46,8 +46,13 @@ ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 
 def run_safekeep(*args, env=None):
-    """Invoke the script as a subprocess, the way a user does."""
-    return subprocess.run([sys.executable, '-m', 'safekeep', *args], capture_output=True, text=True, env=env)
+    """Invoke the script as a subprocess, the way a user does, with color stripped from both streams.
+
+    Typer forces a color terminal whenever GITHUB_ACTIONS is set, so its help and usage errors carry
+    escapes in CI that they never carry in a local pipe.
+    """
+    result = subprocess.run([sys.executable, '-m', 'safekeep', *args], capture_output=True, text=True, env=env)
+    return subprocess.CompletedProcess(result.args, result.returncode, plain(result.stdout), plain(result.stderr))
 
 
 def editor_writing(tmp_path, content):
@@ -132,20 +137,13 @@ def test_help_lists_every_public_command(tmp_path):
 
 
 def test_restore_help_works_without_the_option_it_documents(tmp_path):
-    """--to cannot be argparse-required, or asking how to use restore fails on the very
-    argument the answer explains. See the --to argument in build_parser."""
+    """Every restore needs --to, and the screen that explains it answers without one."""
     result = run_safekeep('restore', '--help')
     assert result.returncode == 0
     assert '--to' in result.stdout
+    assert 'restore-test' in result.stdout, 'the help for --to points at rehearsing, not just at the flag'
     for selection in ('--all', '--source', '--tag'):
         assert selection in result.stdout
-
-
-def test_restore_without_a_target_says_which_option_is_missing(tmp_path):
-    result = run_safekeep('restore', '--all')
-    assert result.returncode == 2
-    assert '--to' in result.stderr
-    assert 'restore-test' in result.stderr, 'the error points at rehearsing, not just at the flag'
 
 
 def test_backup_help_documents_narrowing_a_run(tmp_path):
@@ -192,17 +190,6 @@ def test_unknown_command_is_a_usage_error(tmp_path):
     assert result.returncode == 2
 
 
-def test_every_command_in_the_tree_is_documented(tmp_path):
-    """The fzf preview panes used to run two hidden preview-* commands. They are `snapshots
-    show` now, so nothing in the tree is undocumented and the old names are gone."""
-    result = run_safekeep('--help')
-    assert 'preview-snapshot' not in result.stdout
-    assert 'preview-source' not in result.stdout
-    assert 'SUPPRESS' not in result.stdout
-    assert 'safekeep snapshots show' in result.stdout
-    assert run_safekeep('preview-snapshot', '2026-08-13').returncode == 2
-
-
 @pytest.mark.parametrize('namespace', ['backup', 'snapshots', 'files', 'tags', 'config'])
 def test_a_bare_namespace_shows_its_own_help(tmp_path, namespace):
     """A namespace names a resource without selecting a verb, so it prints the screen that
@@ -232,21 +219,21 @@ def test_a_namespace_screen_names_its_verbs(tmp_path):
             assert f'safekeep {namespace} {verb}' in result.stdout
 
 
-def test_a_verb_missing_its_argument_says_which_one(tmp_path, source_tree):
-    """Both positionals are optional in the parser so `--help` reaches its screen; the error
-    that replaces argparse's names the argument and where to find its values."""
+def test_snapshots_show_and_tags_show_with_no_argument_list_what_they_could_take(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    for verb, wanted in (('snapshots', 'snapshots list'), ('tags', 'tags list')):
-        result = run_safekeep('--config', str(config_path), verb, 'show')
-        assert result.returncode == 2
-        assert wanted in result.stderr
+    config_path = write_config(tmp_path, dest, back_up_paths=[{'path': str(source_tree / 'notes'), 'tags': ['docs']}])
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    (snapshot,) = [d.name for d, _ in safekeep.list_snapshots(dest)]
 
+    snapshots = run_safekeep('--config', str(config_path), 'snapshots', 'show')
+    assert snapshots.returncode == 2
+    assert 'Missing DATE' in snapshots.stderr
+    assert f'{snapshot}  (newest)' in snapshots.stderr
 
-def test_a_verbs_help_is_its_namespaces_screen(tmp_path):
-    """One screen per namespace, so `backup --help` and `backup run --help` reach the same page
-    rather than a drill-down you read to learn there was nothing on it."""
-    assert run_safekeep('backup', 'run', '--help').stdout == run_safekeep('backup', '--help').stdout
+    tags = run_safekeep('--config', str(config_path), 'tags', 'show')
+    assert tags.returncode == 2
+    assert 'Missing NAME' in tags.stderr
+    assert 'Tags: docs' in tags.stderr
 
 
 # --- config loading -------------------------------------------------------------------
@@ -1497,13 +1484,23 @@ def backup_and_restore(tmp_path, source_tree, *restore_args, config_extra=None):
     return restore, target
 
 
-def test_restore_requires_to(tmp_path, source_tree):
+def test_restore_with_a_selection_and_no_to_prints_a_rehearsal_that_runs_as_printed(tmp_path, source_tree):
     dest = tmp_path / 'dest'
-    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    config_path = write_config(tmp_path, dest, back_up_paths=[{'path': str(source_tree / 'notes'), 'tags': ['docs']}])
     run_safekeep('--config', str(config_path), 'backup', 'run')
-    result = run_safekeep('--config', str(config_path), 'restore', '--all')
-    assert result.returncode == 2  # usage error, per cli-design.md
-    assert '--to' in result.stderr
+    # Wide enough that the error panel holds the command on one line, as a terminal of that width would.
+    wide = {**os.environ, 'COLUMNS': '1000'}
+
+    result = run_safekeep('--config', str(config_path), 'restore', '--tag', 'docs', '-n', env=wide)
+    assert result.returncode == 2
+    assert 'Missing --to' in result.stderr
+    (line,) = [line for line in result.stderr.splitlines() if 'Rehearse this one first:' in line]
+    printed = shlex.split(line.split('Rehearse this one first:')[1].strip(' │'))
+    assert printed[0] == 'safekeep'
+
+    rehearsed = run_safekeep(*printed[1:])
+    assert rehearsed.returncode == 0, rehearsed.stderr
+    assert 'would restore 1 source' in rehearsed.stdout
 
 
 def test_restore_without_selection_is_an_error_when_not_a_tty(tmp_path, source_tree):
@@ -2258,23 +2255,3 @@ def test_version_is_read_from_the_installed_metadata():
     copy in the module would be the one that goes stale."""
     assert safekeep.tool_version() != 'unknown', 'the test environment installs safekeep'
     assert 'safekeep' not in safekeep.tool_version()
-
-
-def test_update_is_a_command_rather_than_a_usage_error():
-    """Parsed here rather than run, because running it reaches the network. That the
-    verb resolves at all is what a typo in the parser would break."""
-    args = safekeep.build_parser().parse_args(['update'])
-    assert args.command == 'update'
-
-
-def test_an_applied_update_names_a_missing_lock_and_ends_through_exit_now(monkeypatch, capsys):
-    exits = []
-    monkeypatch.setattr(safekeep, 'update', lambda config: Result(current='v1.0.0', latest='v2.0.0', applied=True, lock_missing=True))
-    monkeypatch.setattr(safekeep, 'exit_now', lambda: exits.append(0) or sys.exit(0))
-    monkeypatch.setattr(sys, 'argv', ['safekeep', 'update'])
-
-    with pytest.raises(SystemExit):
-        safekeep.main()
-
-    assert exits == [0]
-    assert 'v2.0.0 has no uv.lock' in capsys.readouterr().err

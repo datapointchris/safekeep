@@ -21,16 +21,17 @@ classifiers = [
 # a PEP 723 header in dotfiles.
 requires-python = ">=3.12"
 
-# The house palette and help grammar, so safekeep's screens match every other
-# CLI on PATH, and the fleet's notify-only self-update. Both are themselves
-# dependency-free, so the copying is still rsync and the config is still read
-# with stdlib tomllib.
+# typer owns the command tree, and rich renders its help. pytermstyle colors the
+# command output and clips rows to the terminal, so a run reads like the shell
+# tools beside it. pyselfupdate is the notify-only self-update, and its [typer]
+# extra is the `update` command's reporting. The copying is rsync and the config
+# is read with stdlib tomllib.
 # pyselfupdate resolves from PyPI and pytermstyle from git, purely because
-# 'pytermstyle' was already taken there. No [typer] extra — safekeep is argparse,
-# and that extra exists only for the ready-made typer command.
+# 'pytermstyle' was already taken there.
 dependencies = [
     "pytermstyle",
-    "pyselfupdate>=0.5.0",
+    "pyselfupdate[typer]>=0.5.0",
+    "typer>=0.16.0",
 ]
 
 [tool.uv.sources]
@@ -152,7 +153,7 @@ managed = [
 pinned = ["ruff"]
 
 [project.scripts]
-safekeep = "safekeep:main"
+safekeep = "safekeep.main:main"
 
 [project.urls]
 Repository = "https://github.com/datapointchris/safekeep"

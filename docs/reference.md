@@ -5,7 +5,7 @@ The full behavior, and the reasoning behind it. `README.md` is the short version
 This document moved here from the dotfiles repository in August 2026, when safekeep became its
 own project. The decisions it records were made while it lived there.
 
-Config-driven file preservation that rsync-copies files and directories to a destination as timestamped snapshots, one per run. Each snapshot carries a manifest describing what was collected, so a snapshot can be restored without the config that produced it. Zero external dependencies for backup — Python stdlib only. Restore shells out to fzf for interactive selection.
+Config-driven file preservation that rsync-copies files and directories to a destination as timestamped snapshots, one per run. Each snapshot carries a manifest describing what was collected, so a snapshot can be restored without the config that produced it. The copying is rsync, and restore shells out to fzf for interactive selection.
 
 Primary use case: backing up scattered config files, local scripts, and git-untracked WIP from a WSL work machine to a network drive for crash protection, and restoring them onto a rebuilt machine.
 
@@ -89,7 +89,7 @@ tags = ["wip"]
 
 **Every key states what safekeep will do, so the file reads as a description of the backup rather than a list of this program's variables.** That is the standard in `standards/configuration.md`, and safekeep is its worked example.
 
-**TOML, not JSON, and the reason is `tomllib`.** safekeep takes no dependencies on the backup path because it has to run on a locked-down work machine where installing a package is a fight, and `tomllib` has been in the standard library since 3.11 while YAML has never had a stdlib parser and never will. Comments come free with that choice, and they are what turns the file into its own manual. YAML would additionally have been the wrong fit for a config full of glob patterns: an unquoted `*.pyc` is alias syntax rather than a string, and bare `~` is null.
+**TOML, not JSON, and the reason is `tomllib`.** Every dependency is one more package to get onto a locked-down work machine, where installing one is a fight, and `tomllib` has been in the standard library since 3.11 while YAML has never had a stdlib parser and never will. Comments come free with that choice, and they are what turns the file into its own manual. YAML would additionally have been the wrong fit for a config full of glob patterns: an unquoted `*.pyc` is alias syntax rather than a string, and bare `~` is null.
 
 `tomllib` reads but cannot write, so `init` emits a hand-authored template rather than serializing a dict — which is the better half of the trade, since a serialized dict cannot carry comments. `CONFIG_TEMPLATE` in the script is that file, and two tests assert it parses without warnings and demonstrates repetition rather than one of each key.
 
@@ -410,4 +410,5 @@ miss.
   archives, the complementary tool
 - [Tool Composition](https://datapointchris.github.io/dotfiles/architecture/tool-composition/) —
   how safekeep fits into the wider toolchain
-- [pytermstyle](https://github.com/datapointchris/pytermstyle) — the palette and help grammar
+- [pytermstyle](https://github.com/datapointchris/pytermstyle) — the palette and row clipping of
+  the command output

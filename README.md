@@ -37,8 +37,8 @@ safekeep config example          # print a starting config
 ```
 
 The verb comes last, and nothing acts until one selects it — a partial command prints the screen
-that completes it rather than guessing. `safekeep --help` is the one copy of the command surface, so
-it is not repeated here.
+that completes it rather than guessing. The help screens are the one copy of the command surface:
+`safekeep --help` for the tree, and each command's `-h` for its flags. So it is not repeated here.
 
 [`docs/reference.md`](docs/reference.md) is the full behavior: the manifest format, the restore
 conflict policies, the schema-change rules, and the reasoning behind each of them.
@@ -82,7 +82,7 @@ task fix        # ruff format and autofix
 Releases are cut by python-semantic-release from conventional commits on `main`. Nothing is tagged
 by hand.
 
-The terminal style — palette, section header, help grammar — comes from
-[pytermstyle](https://github.com/datapointchris/pytermstyle), so safekeep's screens are
-indistinguishable from the bash and Go CLIs beside it on `PATH`. Everything else is stdlib: the
-config is read with `tomllib` and the copying is `rsync`.
+[Typer](https://typer.tiangolo.com) owns the command tree and renders the help.
+[pytermstyle](https://github.com/datapointchris/pytermstyle) colors the command output and clips
+its rows to the terminal, so a run reads like the bash and Go CLIs beside it on `PATH`. The config
+is read with stdlib `tomllib`, and the copying is `rsync`.
