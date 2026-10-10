@@ -1733,8 +1733,7 @@ def select_groups(manifest, request: RestoreRequest):
     """Resolve which groups to restore from flags, or None if selection is interactive.
 
     A --source is matched against each source both as recorded and as this machine names it, so
-    a path copied out of `files list` still matches a snapshot taken under another home. One
-    naming a source exactly selects that source alone: `~/code/app` is not `~/code/app-api`.
+    a path copied out of `files list` still matches a snapshot taken under another home.
     """
     groups = manifest.get('groups', [])
     if request.all:
@@ -1745,12 +1744,10 @@ def select_groups(manifest, request: RestoreRequest):
 
     home_then = manifest.get('home')
     home_now = str(Path.home())
-    needles = [normalized_needle(needle) for needle in request.source]
-    named = [(group, source_names(group['source'], home_then, home_now)) for group in groups]
-    exact = {needle for needle in needles if any(needle in names for _, names in named)}
     selected = []
-    for group, names in named:
-        matched_source = any(needle in names if needle in exact else any(needle in name for name in names) for needle in needles)
+    for group in groups:
+        names = source_names(group['source'], home_then, home_now)
+        matched_source = any(source_selects(needle, name) for needle in request.source for name in names)
         matched_tag = any(tag in group.get('tags', []) for tag in request.tag)
         if matched_source or matched_tag:
             selected.append(group)
@@ -1817,6 +1814,19 @@ def remap_home(source, manifest_home, target_home):
 def normalized_needle(needle):
     """A --source as typed, with its ~ expanded and any trailing slash or ./ dropped."""
     return os.path.normpath(os.path.expanduser(needle))
+
+
+def source_selects(needle, source):
+    """Whether a --source selects the source at `source`, for backup, restore and the check before either.
+
+    A path selects the source at it and every source beneath it, so `~/code/app` leaves
+    `~/code/app-api` out whatever else the config or snapshot holds. A bare word such as `app`
+    selects every source whose path contains it.
+    """
+    wanted = normalized_needle(needle)
+    if os.path.isabs(wanted):
+        return source == wanted or source.startswith(wanted.rstrip('/') + '/')
+    return wanted in source
 
 
 def source_names(source, manifest_home, target_home):
@@ -2223,7 +2233,7 @@ def explain_empty_selection(dest, manifest, date, request: RestoreRequest, confi
     if request.source:
         needles = yellow(', '.join(request.source))
         home_then, home_now = manifest.get('home'), str(Path.home())
-        print(f'  no source in {cyan(date)} contains {needles}, and it holds nothing at that path inside one:', file=sys.stderr)
+        print(f'  no source in {cyan(date)} matches {needles}, and it holds nothing at that path inside one:', file=sys.stderr)
         for row in source_rows(groups):
             print(f'    {tilde(remap_home(row["source"], home_then, home_now))}', file=sys.stderr)
     if request.all and not groups:
@@ -2394,65 +2404,106 @@ def do_restore(config, config_path, request: RestoreRequest):
     verb = yellow('would restore') if request.dry_run else green('restored')
     print(f'\n{bold("safekeep:")} {verb} {bold(selection_count(restored))} to {cyan(request.to)}')
 
-    # Only where the newest snapshot was taken for granted: a --from chose this one on purpose.
-    if narrowed_to and request.all and not request.from_date:
-        for older, lacking in sources_held_before(dest, snapshot_dir, manifest):
-            rest = replace(request, all=False, source=lacking, tag=[])
-            them = 'it' if len(lacking) == 1 else 'them'
+    # Only where the newest snapshot was taken for granted: a --from or the picker chose this one on purpose.
+    if narrowed_to and not request.from_date and (request.all or request.source or request.tag):
+        print_restores_of_the_rest(dest, snapshot_dir, manifest, request, config_path)
+
+
+@dataclass(frozen=True)
+class OlderSources:
+    """What one older snapshot adds to a restore from a narrowed one."""
+
+    snapshot: str
+    # Sources sharing no path with one restored before them.
+    apart: list[str]
+    # Sources inside one restored before them, or holding one, so restoring them rewrites newer files.
+    overlapping: list[str]
+    # The first snapshot walked past without a record of whether it was narrowed, if this is it or beyond it.
+    unrecorded_from: str | None
+
+
+def print_restores_of_the_rest(dest, snapshot_dir, manifest, request: RestoreRequest, config_path):
+    """The restores that bring back what a narrowed snapshot lacks of the selection, one per older snapshot."""
+    offers = sources_held_before(dest, snapshot_dir, manifest, request)
+    unrecorded = next((offer.unrecorded_from for offer in offers if offer.unrecorded_from), None)
+    if unrecorded:
+        print(
+            f'  {yellow("note:")} snapshots from {cyan(unrecorded)} back were taken before safekeep recorded narrowing, '
+            'so one below may offer a source the config has since dropped'
+        )
+    # A file a newer snapshot just wrote is kept where an older one shares it. skip already keeps every existing file.
+    keep_newer = request.on_conflict if request.on_conflict in (ConflictPolicy.SKIP, ConflictPolicy.NEWER) else ConflictPolicy.NEWER
+    for offer in offers:
+        if offer.apart:
+            rest = replace(request, all=False, source=offer.apart, tag=[])
+            them = 'it' if len(offer.apart) == 1 else 'them'
             print(
-                f'  restore the {plural(len(lacking), "source")} it lacks from {cyan(older)}, the newest snapshot holding {them}: '
-                f'{cyan(restore_command(rest, config_path, from_snapshot=older))}'
+                f'  restore the {plural(len(offer.apart), "source")} it lacks from {cyan(offer.snapshot)}, '
+                f'the newest snapshot holding {them}: {cyan(restore_command(rest, config_path, from_snapshot=offer.snapshot))}'
+            )
+        if offer.overlapping:
+            rest = replace(request, all=False, source=offer.overlapping, tag=[], on_conflict=keep_newer)
+            print(
+                f'  restore the {plural(len(offer.overlapping), "source")} from {cyan(offer.snapshot)} that overlap what was '
+                f'restored before, keeping the newer copy of each file: '
+                f'{cyan(restore_command(rest, config_path, from_snapshot=offer.snapshot))}'
             )
 
 
-def sources_held_before(dest, snapshot_dir, manifest):
-    """[(older snapshot, [source])] for each source a narrowed snapshot lacks, from the newest one holding it.
+def sources_held_before(dest, snapshot_dir, manifest, request: RestoreRequest):
+    """[OlderSources] for each selected source a narrowed snapshot lacks, from the newest snapshot holding it.
 
-    The walk stops at the newest snapshot a full run took, which holds every source its config had.
-    Sources are named as this machine names them, the form a restore's --source takes.
+    The walk ends at a snapshot whose run recorded itself as full, which holds every source its
+    config had. One written before narrowed_to existed has no key, and a narrowed run may have
+    taken it, so the walk passes it. Sources are named as this machine names them, the form a
+    restore's --source takes, and a tag is matched as each older snapshot recorded it.
     """
     home_now = str(Path.home())
-
-    def held(held_by):
-        return [remap_home(row['source'], held_by.get('home'), home_now) for row in source_rows(held_by.get('groups', []))]
-
     snapshots = list_snapshots(dest)
     position = next(index for index, (candidate, _) in enumerate(snapshots) if candidate == snapshot_dir)
-    seen = set(held(manifest))
+    seen = {remap_home(row['source'], manifest.get('home'), home_now) for row in source_rows(manifest.get('groups', []))}
     found = []
+    unrecorded_from = None
     for older_dir, older in snapshots[position + 1 :]:
         if older is None:
             continue
-        lacking = [source for source in held(older) if source not in seen]
-        seen.update(lacking)
-        if lacking:
-            found.append((older_dir.name, lacking))
-        if not older.get('narrowed_to'):
+        if unrecorded_from is None and 'narrowed_to' not in older:
+            unrecorded_from = older_dir.name
+        rows = source_rows(older.get('groups', [])) if request.all else selected_rows(older_dir, older, request)
+        apart: list[str] = []
+        overlapping: list[str] = []
+        taken: set[str] = set()
+        for row in rows:
+            # A row naming a path inside a source belongs to that source.
+            source = remap_home(row.get('within', row['source']), older.get('home'), home_now)
+            if source in seen:
+                continue
+            path = remap_home(row['source'], older.get('home'), home_now)
+            shares = any(source.startswith(held + '/') or held.startswith(source + '/') for held in seen)
+            (overlapping if shares else apart).append(path)
+            taken.add(source)
+        seen |= taken
+        if apart or overlapping:
+            found.append(OlderSources(older_dir.name, apart, overlapping, unrecorded_from))
+        if 'narrowed_to' in older and older['narrowed_to'] is None:
             break
     return found
 
 
-def select_sources(config, entries, request: BackupRequest):
+def select_sources(entries, request: BackupRequest):
     """The entries a backup run covers: every one, or those matching --tag/--source.
 
     Bare `backup` already means everything, so these narrow rather than enable and there is no
     --all to forget. That is the opposite of restore, where selection is required and never
     inferred -- a backup that silently covered less than asked is the failure to design out,
-    and a restore that silently covered more. A --source naming any entry in the config exactly
-    selects that entry alone, as it does in a restore.
+    and a restore that silently covered more.
     """
     if not request.tag and not request.source:
         return entries
-    every_path = {str(path) for _, path, _ in config_entries(config)}
-    exact = {needle for needle in request.source if normalized_needle(needle) in every_path}
-
-    def selects(needle, path):
-        return normalized_needle(needle) == str(path) if needle in exact else needle in str(path)
-
     return [
         (path, tags)
         for path, tags in entries
-        if any(tag in tags for tag in request.tag) or any(selects(needle, path) for needle in request.source)
+        if any(tag in tags for tag in request.tag) or any(source_selects(needle, str(path)) for needle in request.source)
     ]
 
 
@@ -2466,7 +2517,7 @@ def narrowing(config, request: BackupRequest):
         return None
     repos, back_up_untracked, ignored_patterns = repo_entries(config)
     covered = normalize_entries(config.get('back_up_paths', [])) + (repos if back_up_untracked or ignored_patterns else [])
-    if len(select_sources(config, covered, request)) == len(covered):
+    if len(select_sources(covered, request)) == len(covered):
         return None
     return {'tags': list(request.tag), 'sources': list(request.source)}
 
@@ -2502,8 +2553,8 @@ def require_known_selection(config, config_path, request: BackupRequest):
         print(f'  tags: {green(", ".join(known)) if known else yellow("none")}', file=sys.stderr)
         sys.exit(2)
     for needle in request.source:
-        if not any(needle in str(path) for _, path, _ in entries):
-            print(f'{red("safekeep:")} no path in the config contains {yellow(needle)}', file=sys.stderr)
+        if not any(source_selects(needle, str(path)) for _, path, _ in entries):
+            print(f'{red("safekeep:")} no source in the config matches {yellow(needle)}', file=sys.stderr)
             for _, path, _ in entries:
                 print(f'    {tilde(str(path))}', file=sys.stderr)
             sys.exit(2)
@@ -2614,7 +2665,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
     if request.label is not None:
         manifest['label'] = request.label.strip() or None
 
-    entries = select_sources(config, normalize_entries(config.get('back_up_paths', [])), request)
+    entries = select_sources(normalize_entries(config.get('back_up_paths', [])), request)
     if entries:
         print(f'\n{bold("paths:")}')
         present = []
@@ -2632,7 +2683,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
         print(f'  {copy_tally(request.dry_run, copied, plural(len(present), "source"))}')
 
     repos, back_up_untracked, ignored_patterns = repo_entries(config)
-    repos = select_sources(config, repos, request)
+    repos = select_sources(repos, request)
     if repos and back_up_untracked:
         print(f'\n{bold("untracked:")}')
         for repo_path, tags in repos:

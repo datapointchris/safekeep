@@ -190,13 +190,6 @@ def test_restore_help_works_without_the_option_it_documents(tmp_path):
         assert selection in result.stdout
 
 
-def test_backup_help_documents_narrowing_a_run(tmp_path):
-    result = run_safekeep('backup', '--help')
-    assert result.returncode == 0
-    assert '--tag' in result.stdout
-    assert 'partial snapshot' in result.stdout, 'a narrowed run records less than a full one, which needs saying'
-
-
 def test_restore_help_is_its_own_screen_not_the_root(tmp_path):
     result = run_safekeep('restore', '--help')
     assert 'safekeep restore' in result.stdout
@@ -2125,13 +2118,6 @@ def narrowed_after_full(tmp_path, source_tree):
     return config_path, full
 
 
-def test_a_run_that_left_a_source_out_records_its_selection_and_a_full_run_records_none(tmp_path, source_tree):
-    _, full = narrowed_after_full(tmp_path, source_tree)
-    dest = tmp_path / 'dest'
-    assert safekeep.read_manifest(dest / full)['narrowed_to'] is None
-    assert safekeep.read_manifest(latest_snapshot(dest))['narrowed_to'] == {'tags': ['secrets'], 'sources': []}
-
-
 def test_a_selection_every_source_matches_writes_a_full_snapshot(tmp_path, source_tree):
     """Every source in the matrix config carries docs, so --tag docs leaves nothing out."""
     dest = tmp_path / 'dest'
@@ -2265,6 +2251,92 @@ def test_the_restore_of_what_a_narrowed_snapshot_lacks_leaves_out_a_source_its_p
     assert run_safekeep(*rest).returncode == 0
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
     assert (target / safekeep.snapshot_rel(source_tree / 'notes-old') / 'kept.md').read_text() == 'the newer copy\n'
+
+
+def test_a_restore_naming_a_source_the_newest_snapshot_lacks_misses_rather_than_restoring_the_one_beside_it(tmp_path, source_tree):
+    """After `backup run --source notes-old`, `restore --source notes` finds notes only in the snapshot before."""
+    dest, config_path = prefixed_sources(tmp_path, source_tree)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    full = age_todays_snapshot(dest).name
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--source', str(source_tree / 'notes-old'))
+
+    target = tmp_path / 'target'
+    missed = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--source', str(source_tree / 'notes'))
+    assert missed.returncode == 1
+    assert not target.exists()
+    retry = printed_after('restore it from the newest snapshot that holds it:', missed.stderr)
+    assert retry[retry.index('--from') + 1] == full
+
+
+def test_a_backup_source_typed_with_a_trailing_slash_selects_that_source(tmp_path, source_tree):
+    """Tab completion ends a directory with a slash, and `backup run --source ~/code/app/` is how it arrives."""
+    dest, config_path = prefixed_sources(tmp_path, source_tree)
+    run = run_safekeep('--config', str(config_path), 'backup', 'run', '--source', f'{source_tree / "notes"}/')
+    assert run.returncode == 0, run.stderr
+    assert sources_of(latest_snapshot(dest)) == {str(source_tree / 'notes')}
+
+
+def test_a_tag_restore_from_a_narrowed_snapshot_prints_the_restore_of_the_tagged_sources_it_lacks(tmp_path, source_tree):
+    """Both sources carry secrets and `backup run --source` took one, so `restore --tag secrets` brings
+    back that one and prints the restore of the other."""
+    dest = tmp_path / 'dest'
+    secrets = [{'path': str(source_tree / name), 'tags': ['secrets']} for name in ('notes', 'solo.conf')]
+    config_path = write_config(tmp_path, dest, back_up_paths=secrets)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    full = age_todays_snapshot(dest).name
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--source', str(source_tree / 'solo.conf'))
+
+    target = tmp_path / 'target'
+    restored = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--tag', 'secrets')
+    assert restored.returncode == 0, restored.stderr
+    rest = printed_after('the newest snapshot holding it:', restored.stdout)
+    assert rest[rest.index('--from') + 1] == full
+    assert run_safekeep(*rest).returncode == 0
+    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').read_text() == 'plain\n'
+
+
+def without_narrowing_record(snapshot_dir):
+    """A manifest as safekeep 2.2.0 and earlier wrote every one, with no narrowed_to key."""
+    path = snapshot_dir / safekeep.MANIFEST_NAME
+    manifest = json.loads(path.read_text())
+    del manifest['narrowed_to']
+    path.write_text(json.dumps(manifest))
+
+
+def test_a_narrowed_snapshot_written_before_the_record_does_not_end_the_walk(tmp_path, source_tree):
+    """A run narrowed to the secrets under 2.2.0 left no key, and another ran under this version. The
+    notes are only in the full snapshot beyond both."""
+    config_path, full = narrowed_after_full(tmp_path, source_tree)
+    dest = tmp_path / 'dest'
+    without_narrowing_record(age_todays_snapshot(dest, '2021-01-01'))
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'secrets')
+
+    target = tmp_path / 'target'
+    restored = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
+    assert restored.returncode == 0, restored.stderr
+    assert 'snapshots from 2021-01-01 back were taken before safekeep recorded narrowing' in restored.stdout
+    rest = printed_after('the newest snapshot holding it:', restored.stdout)
+    assert rest[rest.index('--from') + 1] == full
+
+
+def test_a_full_snapshot_ends_the_walk_so_a_source_dropped_before_it_is_not_offered(tmp_path, source_tree):
+    """linked.conf was in the config for the oldest run, then dropped before the full one."""
+    dest = tmp_path / 'dest'
+    kept = [{'path': str(source_tree / 'notes'), 'tags': ['notes']}, {'path': str(source_tree / 'solo.conf'), 'tags': ['secrets']}]
+    run_safekeep(
+        '--config', str(write_config(tmp_path, dest, back_up_paths=[*kept, {'path': str(source_tree / 'linked.conf')}])), 'backup', 'run'
+    )
+    age_todays_snapshot(dest, '2019-01-01')
+    config_path = write_config(tmp_path, dest, back_up_paths=kept)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    full = age_todays_snapshot(dest).name
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'secrets')
+
+    restored = run_safekeep('--config', str(config_path), 'restore', '--to', str(tmp_path / 'target'), '--all')
+    assert restored.returncode == 0, restored.stderr
+    offered = [line for line in restored.stdout.splitlines() if 'it lacks from' in line]
+    assert len(offered) == 1 and full in offered[0], offered
+    assert 'linked.conf' not in restored.stdout
 
 
 @pytest.mark.parametrize('selection', ['tag', 'source'])

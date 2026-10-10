@@ -262,7 +262,7 @@ def backup_run(
         typer.Option(
             '--source',
             metavar='PATH',
-            help='Only the source at PATH, or else every source whose path contains PATH (repeatable)',
+            help='Only the source at PATH and any beneath it, or for a bare word, every source whose path contains it (repeatable)',
             rich_help_panel='Selection',
         ),
     ] = None,
@@ -524,7 +524,10 @@ def restore(
         typer.Option(
             '--source',
             metavar='PATH',
-            help='The source at PATH, or else every source whose path contains PATH, or one file or directory inside one (repeatable)',
+            help=(
+                'The source at PATH and any beneath it, every source whose path contains a bare word, '
+                'or one file or directory inside a source (repeatable)'
+            ),
             rich_help_panel='Selection',
         ),
     ] = None,
@@ -549,8 +552,8 @@ def restore(
     selects on the tags the snapshot recorded, and `safekeep tags show NAME` says what it selects.
 
     Without `--from` the restore reads the newest snapshot. Where a narrowed backup took that one,
-    `--all` restores what it holds, then prints a restore for the rest from the newest snapshot
-    holding each source. On a terminal with nothing selected, it lists the snapshots to choose from
+    the restore brings back what it holds of the selection, then prints a restore for the rest from
+    the newest snapshot holding each source. On a terminal with nothing selected, it lists the snapshots to choose from
     instead, then the sources in the one chosen. Files from under the home that took the snapshot
     land under this machine's home.
 

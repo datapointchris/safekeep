@@ -205,7 +205,7 @@ anything, and never edit inside the destination. Restore only ever reads, so it 
 
 ## The Manifest
 
-`.safekeep-manifest.json` is written into each snapshot and is what makes it restorable on a machine that no longer has the config. It records the groups collected (kind, source, tags, counts, sizes), the source `home` for remapping, file modes, symlink origins, oversized files that were skipped, any config warnings, and the `label` if one was given. `narrowed_to` holds the `--tag` and `--source` a run that left sources out was given, as `{"tags": [...], "sources": [...]}`, and is null for a full run. A snapshot written before the key existed has none and reads as full.
+`.safekeep-manifest.json` is written into each snapshot and is what makes it restorable on a machine that no longer has the config. It records the groups collected (kind, source, tags, counts, sizes), the source `home` for remapping, file modes, symlink origins, oversized files that were skipped, any config warnings, and the `label` if one was given. `narrowed_to` holds the `--tag` and `--source` a run that left sources out was given, as `{"tags": [...], "sources": [...]}`, and is null for a full run. A snapshot written before the key existed has none. It is listed as full, since nothing says otherwise, but a restore looking for what a narrowed snapshot lacks walks past it rather than stopping there, because a narrowed run may have taken it.
 
 **A group is a (kind, source) pair, and it is not the unit anything is restored in.** A repo contributes a `git_untracked` group and a `git_ignored` group over one subtree, which restore rsyncs once — so the picker, the counters and the summary all speak in *sources*, and a repo is one row carrying `untracked + ignored`. The manifest keeps the two groups because their file sets are disjoint and each carries its own list; nothing above the manifest has a reason to.
 
@@ -222,7 +222,7 @@ A snapshot with no manifest cannot be restored by safekeep — it says so and po
 ```bash
 safekeep backup run                     # everything the config lists
 safekeep backup run --tag secrets       # only the entries carrying that tag
-safekeep backup run --source ~/.ssh     # only the entry at that path, or else those containing it
+safekeep backup run --source ~/.ssh     # only the entry at that path, and any beneath it
 safekeep backup run --label 'before the wsl move'   # say why this one was taken
 ```
 
@@ -336,9 +336,11 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
 
 **A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
 
-**`--source` selects the source at that path, and otherwise every source whose path contains it.**
-`--source ~/code/app` is that repo alone, and leaves `~/code/app-api` out. `--source app` matches no
-source exactly, so it selects both. `backup run --source` follows the same rule against the config.
+**A `--source` that is a path selects the source at it and every source beneath it.** `--source
+~/code/app` is that repo, and leaves `~/code/app-api` out. A bare word is matched as a substring, so
+`--source app` selects both. The rule reads the path alone, never what else the snapshot holds, so a
+snapshot without `~/code/app` is a miss rather than a restore of its neighbor. `backup run --source`
+and the check that rejects a selection matching nothing use the same rule.
 
 **`--source` also takes a full path to a file or directory inside a source, and restores that path
 alone.** That is the form `safekeep files list` prints. The path is matched both as this machine
@@ -359,7 +361,9 @@ Both pickers pin their keys above the prompt, because the picker is the only pla
 
 **A selection that matched nothing exits 1 and says why.** Canceling out of the fzf picker is a restore you decided against, and exits 0; `--tag wsl` matching nothing in the snapshot is a request that failed, and a caller has to be able to tell the two apart. The error names the tags that snapshot does carry, which is the fact that distinguishes a typo from a tag added to the config after the snapshot was taken.
 
-**`--all` from a narrowed newest snapshot restores what it holds, then prints a restore for the rest.** Without `--from`, the newest snapshot is taken for granted, and a narrowed one is not everything. The run names the narrowing beneath its header, restores what the snapshot holds, and ends with one restore per older snapshot. Each source the narrowed one lacks comes from the newest snapshot holding it, and the walk stops at the newest full one. Each printed restore names its sources by `--source` and keeps `--to` and `--on-conflict`, so a newer copy just restored is never replaced by an older one. A `--from` naming a narrowed snapshot chose it on purpose, so that restore names the narrowing and offers nothing more.
+**A restore from a narrowed newest snapshot brings back what it holds, then prints a restore for the rest of the selection.** Without `--from`, the newest snapshot is taken for granted, and a narrowed one holds only what its run selected. So `--tag secrets` after `backup run --source ~/.ssh` restores `~/.ssh` and misses every other source tagged `secrets`. The run names the narrowing beneath its header, restores what the snapshot holds, and ends with the restores for the sources of `--all`, `--source` or `--tag` it lacks. Each comes from the newest snapshot holding it, matched by the tags that snapshot recorded. The walk stops at the newest snapshot a full run recorded as full. Snapshots from before that record existed are walked past, with a note that one of them may offer a source the config has since dropped.
+
+Each printed restore names its sources by `--source` and keeps `--to` and `--on-conflict`, so it touches nothing this run wrote. The exception is a source that holds one restored before it, or sits inside one, such as `~/.config` beside a repo at `~/.config/nvim`. That source gets a restore of its own carrying `--on-conflict newer`, so a newer copy just restored is never replaced by an older one. A `--from` naming a narrowed snapshot, or one picked in the picker, was chosen on purpose, so that restore names the narrowing and offers nothing more.
 
 Bare `safekeep restore` prints the restore help rather than an error — no args shows help, always. Naming a selection and forgetting `--to` is the other case: intent was stated, so that one is an error naming the single missing option.
 
