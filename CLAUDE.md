@@ -35,7 +35,16 @@ fails mypy rather than a run. `src/safekeep/__init__.py` holds the logic and pri
 ## A backup narrows, and a restore must be told
 
 `backup run` with no selection copies every source. `--tag` and `--source` narrow it, so there is
-no `--all` to forget, and a narrowed run writes a snapshot holding only what it collected.
+no `--all` to forget, and a narrowed run writes a snapshot holding only what it collected. A run
+that left a source out records its selection as `narrowed_to` in the manifest, because a short
+source list alone could also mean a source was dropped from the config. A restore from a narrowed
+newest snapshot ends by printing a restore for each selected source it lacks, from the newest
+snapshot holding it. A manifest without the key predates it and might be narrowed, so it is read as
+full for display but never ends that walk.
+
+`--source` has one predicate, `source_selects`, for backup, restore and the check before either. A
+path selects the source at it and those beneath it, and a bare word matches as a substring.
+
 `restore` requires `--all`, `--source` or `--tag` and never infers one. On a terminal with none,
 it opens fzf pickers instead. A selection that matches nothing exits 1.
 

@@ -260,7 +260,10 @@ def backup_run(
     source: Annotated[
         list[str] | None,
         typer.Option(
-            '--source', metavar='PATH', help='Only the sources whose path contains PATH (repeatable)', rich_help_panel='Selection'
+            '--source',
+            metavar='PATH',
+            help='Only the source at PATH and any beneath it, or for a bare word, every source whose path contains it (repeatable)',
+            rich_help_panel='Selection',
         ),
     ] = None,
     group: GroupAlias = None,
@@ -271,8 +274,9 @@ def backup_run(
 
     A source is one entry in the config: a path, or one git repo's untracked and ignored files.
     Every source is copied unless `--tag` or `--source` narrows the run. A narrowed run records only
-    what it collected, so it writes a partial snapshot beside the full one rather than topping it up.
-    `safekeep tags list` says which tags there are to narrow by.
+    what it collected, so it writes a partial snapshot beside the full one rather than topping it up,
+    and `snapshots list` marks it `narrowed`. A selection every source matches leaves nothing out,
+    so its snapshot is a full one. `safekeep tags list` says which tags there are to narrow by.
 
     Each file copied is named as it is copied. A file unchanged since the previous snapshot is not
     named: it becomes a hard link into that snapshot, costing no space, or a full copy where the
@@ -318,9 +322,9 @@ def snapshots_list(ctx: typer.Context, as_json: JsonOption = False) -> None:
     """Every snapshot at the destination, newest first.
 
     Each row is one backup run: its name, size, files, sources, the machine it ran on and its label.
-    A run narrowed by `--tag` or `--source` holds fewer sources than the runs beside it. A snapshot
-    missing its manifest, the record of what it holds and the modes to restore, is listed and marked,
-    because safekeep cannot restore it.
+    A run narrowed by `--tag` or `--source` is marked `narrowed`, since it holds only the sources it
+    selected. A snapshot missing its manifest, the record of what it holds and the modes to restore,
+    is listed and marked, because safekeep cannot restore it.
     """
     config_path, config, _ = loaded(ctx)
     show_snapshot_list(destination(config), config_path, as_json)
@@ -520,7 +524,10 @@ def restore(
         typer.Option(
             '--source',
             metavar='PATH',
-            help='Sources whose path contains PATH, or one file or directory inside one (repeatable)',
+            help=(
+                'The source at PATH and any beneath it, every source whose path contains a bare word, '
+                'or one file or directory inside a source (repeatable)'
+            ),
             rich_help_panel='Selection',
         ),
     ] = None,
@@ -544,9 +551,11 @@ def restore(
     full path of a file or directory inside a source, which `safekeep files list` prints. A tag
     selects on the tags the snapshot recorded, and `safekeep tags show NAME` says what it selects.
 
-    Without `--from` the restore reads the newest snapshot. On a terminal with nothing selected, it
-    lists the snapshots to choose from instead, then the sources in the one chosen. Files from under
-    the home that took the snapshot land under this machine's home.
+    Without `--from` the restore reads the newest snapshot. Where a narrowed backup took that one,
+    the restore brings back what it holds of the selection, then prints a restore for the rest from
+    the newest snapshot holding each source. On a terminal with nothing selected, it lists the snapshots to choose from
+    instead, then the sources in the one chosen. Files from under the home that took the snapshot
+    land under this machine's home.
 
     Every file is named as it is written, `+` for new and `~` for replaced. `--on-conflict` decides
     what happens to a file already at the target. `backup` replaces it and keeps the old one beside

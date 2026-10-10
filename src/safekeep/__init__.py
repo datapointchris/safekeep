@@ -31,6 +31,7 @@ import tempfile
 import time
 import tomllib
 from dataclasses import dataclass
+from dataclasses import replace
 from enum import StrEnum
 from fnmatch import fnmatch
 from functools import cache
@@ -1034,7 +1035,7 @@ def snapshot_summary(snapshot_dir, manifest):
     """One snapshot as `snapshots list` reports it. A manifestless one is known by its name alone."""
     summary = {'snapshot': snapshot_dir.name, 'restorable': manifest is not None}
     if manifest is None:
-        return summary | dict.fromkeys(('created', 'host', 'label', 'files', 'bytes', 'source_count', 'linked_from'))
+        return summary | dict.fromkeys(('created', 'host', 'label', 'files', 'bytes', 'source_count', 'linked_from', 'narrowed_to'))
     groups = manifest.get('groups', [])
     return summary | {
         'created': manifest.get('created'),
@@ -1044,7 +1045,21 @@ def snapshot_summary(snapshot_dir, manifest):
         'bytes': sum(g.get('bytes', 0) for g in groups),
         'source_count': len(source_rows(groups)),
         'linked_from': manifest.get('linked_from'),
+        'narrowed_to': manifest.get('narrowed_to'),
     }
+
+
+NARROWED = 'narrowed'
+
+
+def narrowed_width(snapshots):
+    """How wide a listing's narrowed column is: none at all where no snapshot in it was narrowed."""
+    return len(NARROWED) if any(manifest and manifest.get('narrowed_to') for _, manifest in snapshots) else 0
+
+
+def narrowed_cell(manifest, width):
+    """The narrowed column of one row, padded so the columns after it line up."""
+    return f'{NARROWED if manifest.get("narrowed_to") else "":<{width}}  ' if width else ''
 
 
 def counted(count, noun, width):
@@ -1068,6 +1083,7 @@ def show_snapshot_list(dest, config_path, as_json=False):
     # shapes, since every snapshot taken before the time was added is a bare date. A shorter
     # name left unpadded shifts every column on its row and the listing stops being scannable.
     width = snapshot_name_width(snapshots)
+    mark_width = narrowed_width(snapshots)
     for snapshot_dir, manifest in snapshots:
         name = f'{snapshot_dir.name:<{width}}'
         summary = snapshot_summary(snapshot_dir, manifest)
@@ -1078,8 +1094,9 @@ def show_snapshot_list(dest, config_path, as_json=False):
         sizes = (
             f'{human_size(summary["bytes"]):>9}  {counted(summary["files"], "file", 6)}  {counted(summary["source_count"], "source", 2)}'
         )
-        cells = f'{name}  {sizes}  {host}'
-        row = f'  {bold(name)}  {sizes}  {cyan(host)}'
+        mark = narrowed_cell(manifest, mark_width)
+        cells = f'{name}  {sizes}  {mark}{host}'
+        row = f'  {bold(name)}  {sizes}  {yellow(mark) if mark.strip() else mark}{cyan(host)}'
         # Free text of any length, so it goes last and is clipped against the columns before it:
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
         # one of them is not at the left. On a terminal only, because a redirected run has no
@@ -1124,6 +1141,8 @@ def show_snapshot_record(dest, date, config_path, as_json=False):
     print(f'config: {manifest.get("config_name", "?")}   home: {manifest.get("home", "?")}')
     if manifest.get('label'):
         print(f'label: {manifest["label"]}')
+    if manifest.get('narrowed_to'):
+        print(f'narrowed to: {narrowing_flags(manifest["narrowed_to"])}, so it holds only the sources that matched')
     # Named because it is what says whether this destination can hard-link at all. A run of
     # snapshots all copied in full means every one of them costs its full size.
     print(f'unchanged files: {link_verdict(manifest.get("linked_from"))}')
@@ -1593,12 +1612,14 @@ def pick_snapshot(dest, config_path):
     # pick_sources uses: fzf renders a tab as a tab stop rather than aligning a column, and a
     # destination holds names of two widths, so the shorter rows would step left.
     width = snapshot_name_width(snapshots)
+    mark_width = narrowed_width(snapshots)
     lines = []
     for snapshot_dir, manifest in snapshots:
         groups = manifest.get('groups', [])
         total_bytes = sum(g.get('bytes', 0) for g in groups)
         shown = f'{snapshot_dir.name:<{width}}  {human_size(total_bytes):>9}  {plural(len(source_rows(groups)), "source"):<10}'
-        lines.append(f'{shown}  {fzf_cell(manifest.get("label"))}'.rstrip() + f'\t{snapshot_dir.name}')
+        mark = narrowed_cell(manifest, mark_width)
+        lines.append(f'{shown}  {mark}{fzf_cell(manifest.get("label"))}'.rstrip() + f'\t{snapshot_dir.name}')
 
     selected = fzf(
         lines,
@@ -1723,11 +1744,10 @@ def select_groups(manifest, request: RestoreRequest):
 
     home_then = manifest.get('home')
     home_now = str(Path.home())
-    needles = [normalized_needle(needle) for needle in request.source]
     selected = []
     for group in groups:
         names = source_names(group['source'], home_then, home_now)
-        matched_source = any(needle in name for needle in needles for name in names)
+        matched_source = any(source_selects(needle, name) for needle in request.source for name in names)
         matched_tag = any(tag in group.get('tags', []) for tag in request.tag)
         if matched_source or matched_tag:
             selected.append(group)
@@ -1794,6 +1814,19 @@ def remap_home(source, manifest_home, target_home):
 def normalized_needle(needle):
     """A --source as typed, with its ~ expanded and any trailing slash or ./ dropped."""
     return os.path.normpath(os.path.expanduser(needle))
+
+
+def source_selects(needle, source):
+    """Whether a --source selects the source at `source`, for backup, restore and the check before either.
+
+    A path selects the source at it and every source beneath it, so `~/code/app` leaves
+    `~/code/app-api` out whatever else the config or snapshot holds. A bare word such as `app`
+    selects every source whose path contains it.
+    """
+    wanted = normalized_needle(needle)
+    if os.path.isabs(wanted):
+        return source == wanted or source.startswith(wanted.rstrip('/') + '/')
+    return wanted in source
 
 
 def source_names(source, manifest_home, target_home):
@@ -2200,7 +2233,7 @@ def explain_empty_selection(dest, manifest, date, request: RestoreRequest, confi
     if request.source:
         needles = yellow(', '.join(request.source))
         home_then, home_now = manifest.get('home'), str(Path.home())
-        print(f'  no source in {cyan(date)} contains {needles}, and it holds nothing at that path inside one:', file=sys.stderr)
+        print(f'  no source in {cyan(date)} matches {needles}, and it holds nothing at that path inside one:', file=sys.stderr)
         for row in source_rows(groups):
             print(f'    {tilde(remap_home(row["source"], home_then, home_now))}', file=sys.stderr)
     if request.all and not groups:
@@ -2296,6 +2329,9 @@ def do_restore(config, config_path, request: RestoreRequest):
     # answered when an older one is picked on purpose.
     if manifest.get('label'):
         print(f'  labeled {green(manifest["label"])}')
+    narrowed_to = manifest.get('narrowed_to')
+    if narrowed_to:
+        print(f'  taken by a run narrowed to {yellow(narrowing_flags(narrowed_to))}, so it holds only the sources that matched')
     if manifest_home and manifest_home != target_home:
         print(f'  remapping {cyan(manifest_home)} -> {cyan(target_home)}')
     if request.on_conflict in (ConflictPolicy.BACKUP, ConflictPolicy.OVERWRITE, ConflictPolicy.ASK) and not request.dry_run:
@@ -2368,6 +2404,92 @@ def do_restore(config, config_path, request: RestoreRequest):
     verb = yellow('would restore') if request.dry_run else green('restored')
     print(f'\n{bold("safekeep:")} {verb} {bold(selection_count(restored))} to {cyan(request.to)}')
 
+    # Only where the newest snapshot was taken for granted: a --from or the picker chose this one on purpose.
+    if narrowed_to and not request.from_date and (request.all or request.source or request.tag):
+        print_restores_of_the_rest(dest, snapshot_dir, manifest, request, config_path)
+
+
+@dataclass(frozen=True)
+class OlderSources:
+    """What one older snapshot adds to a restore from a narrowed one."""
+
+    snapshot: str
+    # Sources sharing no path with one restored before them.
+    apart: list[str]
+    # Sources inside one restored before them, or holding one, so restoring them rewrites newer files.
+    overlapping: list[str]
+    # The first snapshot walked past without a record of whether it was narrowed, if this is it or beyond it.
+    unrecorded_from: str | None
+
+
+def print_restores_of_the_rest(dest, snapshot_dir, manifest, request: RestoreRequest, config_path):
+    """The restores that bring back what a narrowed snapshot lacks of the selection, one per older snapshot."""
+    offers = sources_held_before(dest, snapshot_dir, manifest, request)
+    unrecorded = next((offer.unrecorded_from for offer in offers if offer.unrecorded_from), None)
+    if unrecorded:
+        print(
+            f'  {yellow("note:")} snapshots from {cyan(unrecorded)} back were taken before safekeep recorded narrowing, '
+            'so one below may offer a source the config has since dropped'
+        )
+    # A file a newer snapshot just wrote is kept where an older one shares it. skip already keeps every existing file.
+    keep_newer = request.on_conflict if request.on_conflict in (ConflictPolicy.SKIP, ConflictPolicy.NEWER) else ConflictPolicy.NEWER
+    for offer in offers:
+        if offer.apart:
+            rest = replace(request, all=False, source=offer.apart, tag=[])
+            them = 'it' if len(offer.apart) == 1 else 'them'
+            print(
+                f'  restore the {plural(len(offer.apart), "source")} it lacks from {cyan(offer.snapshot)}, '
+                f'the newest snapshot holding {them}: {cyan(restore_command(rest, config_path, from_snapshot=offer.snapshot))}'
+            )
+        if offer.overlapping:
+            rest = replace(request, all=False, source=offer.overlapping, tag=[], on_conflict=keep_newer)
+            overlap = 'overlaps' if len(offer.overlapping) == 1 else 'overlap'
+            print(
+                f'  restore the {plural(len(offer.overlapping), "source")} from {cyan(offer.snapshot)} that {overlap} what was '
+                f'restored before, keeping the newer copy of each file: '
+                f'{cyan(restore_command(rest, config_path, from_snapshot=offer.snapshot))}'
+            )
+
+
+def sources_held_before(dest, snapshot_dir, manifest, request: RestoreRequest):
+    """[OlderSources] for each selected source a narrowed snapshot lacks, from the newest snapshot holding it.
+
+    The walk ends at a snapshot whose run recorded itself as full, which holds every source its
+    config had. One written before narrowed_to existed has no key, and a narrowed run may have
+    taken it, so the walk passes it. Sources are named as this machine names them, the form a
+    restore's --source takes, and a tag is matched as each older snapshot recorded it.
+    """
+    home_now = str(Path.home())
+    snapshots = list_snapshots(dest)
+    position = next(index for index, (candidate, _) in enumerate(snapshots) if candidate == snapshot_dir)
+    seen = {remap_home(row['source'], manifest.get('home'), home_now) for row in source_rows(manifest.get('groups', []))}
+    found = []
+    unrecorded_from = None
+    for older_dir, older in snapshots[position + 1 :]:
+        if older is None:
+            continue
+        if unrecorded_from is None and 'narrowed_to' not in older:
+            unrecorded_from = older_dir.name
+        rows = source_rows(older.get('groups', [])) if request.all else selected_rows(older_dir, older, request)
+        apart: list[str] = []
+        overlapping: list[str] = []
+        taken: set[str] = set()
+        for row in rows:
+            # A row naming a path inside a source belongs to that source.
+            source = remap_home(row.get('within', row['source']), older.get('home'), home_now)
+            if source in seen:
+                continue
+            path = remap_home(row['source'], older.get('home'), home_now)
+            shares = any(source.startswith(held + '/') or held.startswith(source + '/') for held in seen)
+            (overlapping if shares else apart).append(path)
+            taken.add(source)
+        seen |= taken
+        if apart or overlapping:
+            found.append(OlderSources(older_dir.name, apart, overlapping, unrecorded_from))
+        if 'narrowed_to' in older and older['narrowed_to'] is None:
+            break
+    return found
+
 
 def select_sources(entries, request: BackupRequest):
     """The entries a backup run covers: every one, or those matching --tag/--source.
@@ -2382,8 +2504,36 @@ def select_sources(entries, request: BackupRequest):
     return [
         (path, tags)
         for path, tags in entries
-        if any(tag in tags for tag in request.tag) or any(needle in str(path) for needle in request.source)
+        if any(tag in tags for tag in request.tag) or any(source_selects(needle, str(path)) for needle in request.source)
     ]
+
+
+def narrowing(config, request: BackupRequest):
+    """The selection a run records as narrowing its snapshot, or None where it left no source out.
+
+    A selection every source matches narrows nothing, and marking it would send `restore --all`
+    to an older snapshot for files this one holds. Repos count only where a run takes files from them.
+    """
+    if not request.tag and not request.source:
+        return None
+    repos, back_up_untracked, ignored_patterns = repo_entries(config)
+    covered = normalize_entries(config.get('back_up_paths', [])) + (repos if back_up_untracked or ignored_patterns else [])
+    if len(select_sources(covered, request)) == len(covered):
+        return None
+    return {'tags': list(request.tag), 'sources': list(request.source)}
+
+
+def merged_narrowing(earlier, later):
+    """Two runs' narrowing, for the one snapshot they share: full if either run was."""
+    if earlier is None or later is None:
+        return None
+    return {key: earlier[key] + [item for item in later[key] if item not in earlier[key]] for key in ('tags', 'sources')}
+
+
+def narrowing_flags(narrowed_to):
+    """A narrowed run's selection, as the flags that typed it."""
+    tags = [f'--tag {shlex.quote(tag)}' for tag in narrowed_to.get('tags', [])]
+    return ' '.join(tags + [f'--source {shell_path(source)}' for source in narrowed_to.get('sources', [])])
 
 
 def require_known_selection(config, config_path, request: BackupRequest):
@@ -2404,8 +2554,8 @@ def require_known_selection(config, config_path, request: BackupRequest):
         print(f'  tags: {green(", ".join(known)) if known else yellow("none")}', file=sys.stderr)
         sys.exit(2)
     for needle in request.source:
-        if not any(needle in str(path) for _, path, _ in entries):
-            print(f'{red("safekeep:")} no path in the config contains {yellow(needle)}', file=sys.stderr)
+        if not any(source_selects(needle, str(path)) for _, path, _ in entries):
+            print(f'{red("safekeep:")} no source in the config matches {yellow(needle)}', file=sys.stderr)
             for _, path, _ in entries:
                 print(f'    {tilde(str(path))}', file=sys.stderr)
             sys.exit(2)
@@ -2435,6 +2585,7 @@ def merge_manifest(existing, manifest):
     merged['groups'] = [g for g in existing.get('groups', []) if group_id(g) not in replaced] + manifest['groups']
     merged['modes'] = {**existing.get('modes', {}), **manifest['modes']}
     merged['symlinks'] = {**existing.get('symlinks', {}), **manifest['symlinks']}
+    merged['narrowed_to'] = merged_narrowing(existing.get('narrowed_to'), manifest.get('narrowed_to'))
     # This run's verdict on an oversized file replaces the old one, but only for the sources it
     # actually walked.
     merged['skipped_large'] = [
@@ -2445,9 +2596,15 @@ def merge_manifest(existing, manifest):
 
 def do_backup(config, config_path, warnings, request: BackupRequest):
     print(f'{bold("safekeep:")} using config {cyan(config_handle(config_path))}', flush=True)
+    narrowed_to = None
     if request.tag or request.source:
         require_known_selection(config, config_path, request)
-        print(f'  {yellow("narrowed to")} sources matching {bold(", ".join(request.tag + request.source))}', flush=True)
+        narrowed_to = narrowing(config, request)
+        matching = bold(', '.join(request.tag + request.source))
+        if narrowed_to:
+            print(f'  {yellow("narrowed to")} sources matching {matching}', flush=True)
+        else:
+            print(f'  every source matches {matching}, so this snapshot is a full one', flush=True)
 
     start_time = time.monotonic()
     dest = Path(config['back_up_to']).expanduser()
@@ -2488,6 +2645,9 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
         # Which snapshot this one shares inodes with. Filled in after the copying, from inodes
         # this run observed sharing -- see link_source_of. None means a full copy.
         'linked_from': None,
+        # The --tag and --source a run that left sources out was given, so a restore of everything
+        # can say this snapshot is not everything. None is a full run, as is a snapshot without the key.
+        'narrowed_to': narrowed_to,
         'excludes': excludes,
         'max_file_size_mb': max_size_mb,
         'default_file_mode': f'{DEFAULT_FILE_MODE:04o}',
