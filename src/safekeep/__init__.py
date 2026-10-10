@@ -1292,7 +1292,7 @@ def show_files(config, args):
     else:
         shortfall = f', {yellow(f"{len(absent)} not on this machine")}' if absent else ', every one on this machine'
         print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from}{shortfall}')
-    print(f'  at {cyan(str(dest))}, each from the newest snapshot holding it')
+    print(f'  at {cyan(str(dest))}' if args.from_date else f'  at {cyan(str(dest))}, each from the newest snapshot holding it')
 
     # Grouped under the snapshot rather than repeating it on every row: the snapshot is what a
     # restore names with --from, and its label is what says which machine the files came off.
