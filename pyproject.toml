@@ -31,7 +31,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pytermstyle",
     "pyselfupdate[typer]>=0.5.0",
-    "typer>=0.15.0",
+    "typer>=0.16.0",
 ]
 
 [tool.uv.sources]
