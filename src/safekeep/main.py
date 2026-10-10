@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 
 import typer
 from pyselfupdate import Config
@@ -30,6 +31,7 @@ from safekeep import init_config
 from safekeep import load_config
 from safekeep import resolve_config
 from safekeep import resolve_tag_index
+from safekeep import safekeep_for
 from safekeep import shell_path
 from safekeep import show_config
 from safekeep import show_files
@@ -65,6 +67,24 @@ class InWorkflowOrder(TyperGroup):
 
     def list_commands(self, ctx: object) -> list[str]:
         return sorted(self.commands, key=lambda name: self.ORDER.index(name) if name in self.ORDER else len(self.ORDER))
+
+
+class Namespace(TyperGroup):
+    """A namespace takes only a verb, so an option typed before one belongs to a verb.
+
+    The error then prints the command with each verb that takes the option in its place.
+    """
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        if args and args[0].startswith('-') and args[0] not in ctx.help_option_names:
+            flag = args[0].split('=', 1)[0]
+            verbs = [name for name, command in self.commands.items() if any(flag in param.opts for param in command.params)]
+            if verbs:
+                typed = sys.argv[1:]
+                before = typed[: len(typed) - len(args)] if typed[len(typed) - len(args) :] == args else ctx.command_path.split()[1:]
+                retries = '\n'.join(shlex.join(['safekeep', *before, verb, *args]) for verb in verbs)
+                ctx.fail(f'No such option: {flag}. It belongs to a verb, so it goes after one:\n{retries}')
+        return super().parse_args(ctx, args)
 
 
 app = typer.Typer(
@@ -208,6 +228,7 @@ GroupAlias = Annotated[list[str] | None, typer.Option('--group', metavar='PATH',
 # --- backup -----------------------------------------------------------------------------------
 
 backup_app = typer.Typer(
+    cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
     help="""Copy the configured paths into a new snapshot.
@@ -265,6 +286,7 @@ def backup_run(
 # --- snapshots --------------------------------------------------------------------------------
 
 snapshots_app = typer.Typer(
+    cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
     help='What is at the destination, and what each snapshot holds.',
@@ -290,8 +312,8 @@ def snapshots_list(ctx: typer.Context, as_json: JsonOption = False) -> None:
     A snapshot missing its manifest, the record of what it holds and the modes to restore, is listed
     and marked: safekeep cannot restore it.
     """
-    _, config, _ = loaded(ctx)
-    show_snapshot_list(destination(config), as_json)
+    config_path, config, _ = loaded(ctx)
+    show_snapshot_list(destination(config), config_path, as_json)
 
 
 # A miss exits 0 without --json because this is also the restore picker's preview pane, which has
@@ -321,18 +343,20 @@ def snapshots_show(
     Without `--json` an absent snapshot or source prints the reason and exits 0. With `--json` it
     exits 1, so a script can tell an answer from a miss.
     """
-    _, config, _ = loaded(ctx)
+    config_path, config, _ = loaded(ctx)
     if date is None:
-        ctx.fail(f"Missing DATE: which snapshot to show. A date picks that day's last run.\n{snapshot_choices(destination(config))}")
+        choices = snapshot_choices(destination(config), config_path)
+        ctx.fail(f"Missing DATE: which snapshot to show. A date picks that day's last run.\n{choices}")
     if source:
-        show_snapshot_source_files(destination(config), date, source, as_json)
+        show_snapshot_source_files(destination(config), date, source, config_path, as_json)
     else:
-        show_snapshot_record(destination(config), date, as_json)
+        show_snapshot_record(destination(config), date, config_path, as_json)
 
 
 # --- files ------------------------------------------------------------------------------------
 
 files_app = typer.Typer(
+    cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
     help='Every file the snapshots hold, one line each.',
@@ -370,13 +394,14 @@ def files_list(
     backed up from then on only if a config entry covers its path. After the next backup run, its
     line here names the newest snapshot if one does.
     """
-    _, config, _ = loaded(ctx)
-    show_files(config, missing=missing, from_date=from_date, as_json=as_json)
+    config_path, config, _ = loaded(ctx)
+    show_files(config, config_path, missing=missing, from_date=from_date, as_json=as_json)
 
 
 # --- tags -------------------------------------------------------------------------------------
 
 tags_app = typer.Typer(
+    cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
     help="""The tags a restore can select on, and what each would bring back.
@@ -426,8 +451,8 @@ def tags_show(
     """One tag, source by source, and the restore that brings it back."""
     config_path, config, _ = loaded(ctx)
     if name is None:
-        index, _, _ = resolve_tag_index(config, from_date)
-        tags = ', '.join(sorted(index)) if index else 'none yet, so tag the sources with safekeep config edit'
+        index, _, _ = resolve_tag_index(config, config_path, from_date)
+        tags = ', '.join(sorted(index)) if index else f'none yet, so tag the sources with {safekeep_for(config_path)} config edit'
         ctx.fail(f'Missing NAME: which tag to show. Tags: {tags}')
     show_tag(config, config_path, name=name, from_date=from_date, as_json=as_json)
 
@@ -519,6 +544,7 @@ def restore(
 # --- config -----------------------------------------------------------------------------------
 
 config_app = typer.Typer(
+    cls=Namespace,
     no_args_is_help=True,
     rich_markup_mode='markdown',
     help="""Inspect and create config files.

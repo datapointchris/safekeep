@@ -351,7 +351,8 @@ def resolve_config(name, typed=()):
     with the one missing flag added.
     """
     if name and names_a_path(name):
-        path = Path(name).expanduser()
+        # Absolute, so every command printed for this config runs from any directory.
+        path = Path(name).expanduser().absolute()
         if path.is_dir():
             print(f'{red("safekeep:")} {yellow(str(path))} is a directory, and -c takes a config name or a .toml file', file=sys.stderr)
             if holds_snapshots(path):
@@ -890,16 +891,29 @@ def resolve_snapshot(dest, wanted):
     return exact[0] if exact else next((d for d in snapshots if d.name.startswith(wanted)), None)
 
 
-def snapshot_choices(dest):
+def snapshot_choices(dest, config_path):
     """The snapshots an error asking for one can offer, newest first, as plain text lines."""
     names = [snapshot_dir.name for snapshot_dir, _ in list_snapshots(dest)]
+    command = safekeep_for(config_path)
     if not names:
-        return f'No snapshots at {dest} yet. Take one: safekeep backup run'
+        return f'No snapshots at {dest} yet. Take one: {command} backup run'
     lines = [f'  {name}' + ('  (newest)' if position == 0 else '') for position, name in enumerate(names[:SNAPSHOT_CHOICES_SHOWN])]
     hidden = len(names) - SNAPSHOT_CHOICES_SHOWN
     if hidden > 0:
-        lines.append(f'  and {hidden} more: safekeep snapshots list')
+        lines.append(f'  and {hidden} more: {command} snapshots list')
     return 'Snapshots:\n' + '\n'.join(lines)
+
+
+def unreadable_reason(dest, wanted, snapshot_dir, config_path):
+    """Why one snapshot cannot be read: absent, with the ones there are, or present without a manifest."""
+    if snapshot_dir is None:
+        return f'no snapshot {wanted} at {dest}\n{snapshot_choices(dest, config_path)}'
+    return f'snapshot {snapshot_dir.name} has no manifest, so safekeep can neither read nor restore it'
+
+
+def fail_unreadable(dest, wanted, snapshot_dir, config_path):
+    print(f'{red("safekeep:")} {unreadable_reason(dest, wanted, snapshot_dir, config_path)}', file=sys.stderr)
+    sys.exit(1)
 
 
 def previous_snapshot(dest, snapshot_name):
@@ -984,16 +998,22 @@ def snapshot_summary(snapshot_dir, manifest):
     }
 
 
-def show_snapshot_list(dest, as_json=False):
+def counted(count, noun, width):
+    """A count right-aligned to `width` and its noun padded to its plural, so a column of them lines up."""
+    return f'{count:>{width}} {noun if count == 1 else noun + "s":<{len(noun) + 1}}'
+
+
+def show_snapshot_list(dest, config_path, as_json=False):
     snapshots = list_snapshots(dest)
     if as_json:
         print_json([snapshot_summary(snapshot_dir, manifest) for snapshot_dir, manifest in snapshots])
         return
     if not snapshots:
         print(f'{yellow("safekeep:")} no snapshots at {cyan(str(dest))}')
+        print(f'  take one: {cyan(f"{safekeep_for(config_path)} backup run")}')
         return
 
-    print(f'{bold("safekeep:")} {len(snapshots)} snapshots at {cyan(str(dest))}')
+    print(f'{bold("safekeep:")} {plural(len(snapshots), "snapshot")} at {cyan(str(dest))}')
     print()
     # Padded across the listing rather than to a constant: a destination holds names of both
     # shapes, since every snapshot taken before the time was added is a bare date. A shorter
@@ -1003,39 +1023,35 @@ def show_snapshot_list(dest, as_json=False):
         name = f'{snapshot_dir.name:<{width}}'
         summary = snapshot_summary(snapshot_dir, manifest)
         if not summary['restorable']:
-            print(f'  {bold(name)}  {yellow("no manifest — not restorable by safekeep")}')
+            print(f'  {bold(name)}  {yellow("no manifest, so safekeep can neither read nor restore it")}')
             continue
         host = summary['host'] or '?'
-        sizes = f'{human_size(summary["bytes"]):>9}  {summary["files"]:>6} files  {summary["source_count"]:>2} sources'
+        sizes = (
+            f'{human_size(summary["bytes"]):>9}  {counted(summary["files"], "file", 6)}  {counted(summary["source_count"], "source", 2)}'
+        )
         cells = f'{name}  {sizes}  {host}'
         row = f'  {bold(name)}  {sizes}  {cyan(host)}'
         # Free text of any length, so it goes last and is clipped against the columns before it:
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
-        # one of them is not at the left. On a terminal only, for the reason `status` gives --
-        # a redirected run has no width to fit and loses data if one is assumed. clip measures
+        # one of them is not at the left. On a terminal only, because a redirected run has no
+        # width to fit and loses data if one is assumed. clip measures
         # uncolored text, which is what `cells` is for.
         if summary['label']:
             row += '  ' + green(clip_to_terminal(summary['label'], len(cells) + 4))
         print(row)
 
 
-def unreadable_snapshot(dest, date):
-    """Fail a --json read of one snapshot that is absent or has no manifest.
+def show_snapshot_record(dest, date, config_path, as_json=False):
+    """What one snapshot holds, as the manifest records it — also the fzf preview pane.
 
-    The fzf preview pane prints these cases on stdout and succeeds, because a pane has nowhere
-    else to show them. A caller reading JSON has to be able to tell them from an answer.
+    The pane prints a miss on stdout and succeeds, because it has nowhere else to show one. A
+    caller reading JSON has to be able to tell a miss from an answer, so --json exits 1.
     """
-    print(f'{red("safekeep:")} no restorable snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
-    sys.exit(1)
-
-
-def show_snapshot_record(dest, date, as_json=False):
-    """What one snapshot holds, as the manifest records it — also the fzf preview pane."""
     snapshot_dir = resolve_snapshot(dest, date)
     manifest = read_manifest(snapshot_dir) if snapshot_dir else None
     if as_json:
         if manifest is None:
-            unreadable_snapshot(dest, date)
+            fail_unreadable(dest, date, snapshot_dir, config_path)
         home_then = manifest.get('home')
         home_now = str(Path.home())
         print_json(
@@ -1059,11 +1075,8 @@ def show_snapshot_record(dest, date, as_json=False):
             }
         )
         return
-    if snapshot_dir is None:
-        print(f'no snapshot {date} at {dest}')
-        return
     if manifest is None:
-        print('no manifest — not restorable by safekeep')
+        print(unreadable_reason(dest, date, snapshot_dir, config_path))
         return
     print(f'{snapshot_dir.name}   {manifest.get("hostname", "?")}   {manifest.get("created", "?")}')
     print(f'config: {manifest.get("config_name", "?")}   home: {manifest.get("home", "?")}')
@@ -1096,7 +1109,7 @@ def config_entries(config):
     return entries + [('git repo', path, tags) for path, tags in repos]
 
 
-def snapshot_to_size_against(dest, date):
+def snapshot_to_size_against(dest, date, config_path):
     """The snapshot a tag listing reports against: the one named, or the newest restorable one."""
     snapshots = [(d, m) for d, m in list_snapshots(dest) if m is not None]
     if date is None:
@@ -1105,8 +1118,7 @@ def snapshot_to_size_against(dest, date):
     for snapshot_dir, manifest in snapshots:
         if snapshot_dir == named:
             return snapshot_dir, manifest
-    print(f'{red("safekeep:")} no restorable snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
-    sys.exit(1)
+    fail_unreadable(dest, date, named, config_path)
 
 
 def snapshot_sources(manifest):
@@ -1193,14 +1205,14 @@ def print_tag_sources(config_path, dest, snapshot_dir):
         print(f'  in {cyan(config_path.name)}, sized against snapshot {cyan(snapshot_dir.name)}')
 
 
-def resolve_tag_index(config, from_date: str | None):
+def resolve_tag_index(config, config_path, from_date: str | None):
     """The tag index, and the two things a listing has to name beside it.
 
     Both verbs read the config and one snapshot together, and both report which snapshot they
     sized against — so the resolution is here rather than duplicated in each.
     """
     dest = Path(config['back_up_to']).expanduser()
-    snapshot_dir, manifest = snapshot_to_size_against(dest, from_date)
+    snapshot_dir, manifest = snapshot_to_size_against(dest, from_date, config_path)
     return tag_index(config, snapshot_sources(manifest)), dest, snapshot_dir
 
 
@@ -1215,7 +1227,7 @@ def tag_record(name, rows, snapshot_dir):
 
 def show_tag_list(config, config_path, from_date: str | None, as_json: bool):
     """List the tags a restore can select on, and what each would bring back."""
-    index, dest, snapshot_dir = resolve_tag_index(config, from_date)
+    index, dest, snapshot_dir = resolve_tag_index(config, config_path, from_date)
     if as_json:
         print_json([tag_record(name, index[name], snapshot_dir) for name in sorted(index)])
         return
@@ -1224,7 +1236,7 @@ def show_tag_list(config, config_path, from_date: str | None, as_json: bool):
     print_tag_sources(config_path, dest, snapshot_dir)
 
     if not index:
-        print(f'\n  Tag the entries and a restore can select them: {cyan("safekeep config edit")}')
+        print(f'\n  Tag the entries and a restore can select them: {cyan(f"{safekeep_for(config_path)} config edit")}')
         return
 
     print()
@@ -1247,12 +1259,12 @@ def show_tag_list(config, config_path, from_date: str | None, as_json: bool):
     untagged = [path for _, path, tags in config_entries(config) if not tags]
     if untagged:
         print(f'\n  untagged: {plural(len(untagged), "source")} — only {cyan("--all")} or {cyan("--source")} reaches them')
-    print(f'\n  {cyan(f"safekeep tags show {sorted(index)[0]}")}  what one tag covers')
+    print(f'\n  what one tag covers: {cyan(f"{safekeep_for(config_path)} tags show {shlex.quote(sorted(index)[0])}")}')
 
 
 def show_tag(config, config_path, name: str, from_date: str | None, as_json: bool):
     """Show the sources one tag covers, and the restore that would bring them back."""
-    index, dest, snapshot_dir = resolve_tag_index(config, from_date)
+    index, dest, snapshot_dir = resolve_tag_index(config, config_path, from_date)
     rows = index.get(name)
     if not rows:
         print(f'{red("safekeep:")} no tag {yellow(name)} in {cyan(config_path.name)}', file=sys.stderr)
@@ -1281,15 +1293,16 @@ def show_tag(config, config_path, name: str, from_date: str | None, as_json: boo
     if len([row for row in rows if row['files'] is not None]) > 1:
         print(f'  {"":<9} {"":<{width}}  {bold(sized_total(rows))}')
 
-    from_flag = f' --from {from_date}' if from_date else ''
-    print(f'\n  restore it: {cyan(f"safekeep restore --to {shell_path(str(REHEARSAL_ROOT))}{from_flag} --tag {name}")}')
+    from_flag = f' --from {shlex.quote(from_date)}' if from_date else ''
+    restore = f'{safekeep_for(config_path)} restore --to {shell_path(str(REHEARSAL_ROOT))}{from_flag} --tag {shlex.quote(name)}'
+    print(f'\n  restore it: {cyan(restore)}')
 
 
-def restorable_snapshots(dest, date):
+def restorable_snapshots(dest, date, config_path):
     """Every snapshot with a manifest, newest first, or only the one `date` names."""
     if date is None:
         return [(d, m) for d, m in list_snapshots(dest) if m is not None]
-    return [snapshot_to_size_against(dest, date)]
+    return [snapshot_to_size_against(dest, date, config_path)]
 
 
 def snapshot_files(snapshot_dir, manifest, unreadable):
@@ -1372,10 +1385,21 @@ def shell_path(path):
     return shlex.quote(path)
 
 
-def show_files(config, missing: bool, from_date: str | None, as_json: bool):
+def safekeep_for(config_path):
+    """`safekeep` as a printed command must start to read this config again.
+
+    Bare when it is the only config, since -c is then implied. Otherwise with the -c that finds it.
+    """
+    path = Path(config_path)
+    if path.parent != CONFIG_DIR:
+        return f'safekeep -c {shell_path(str(path))}'
+    return 'safekeep' if config_names() == [path.stem] else f'safekeep -c {shlex.quote(path.stem)}'
+
+
+def show_files(config, config_path, missing: bool, from_date: str | None, as_json: bool):
     """Every file the snapshots hold, one line each, grouped under the newest snapshot holding it."""
     dest = Path(config['back_up_to']).expanduser()
-    snapshots = restorable_snapshots(dest, from_date)
+    snapshots = restorable_snapshots(dest, from_date, config_path)
     copies, unreadable = newest_copies(snapshots, progress=not as_json)
     rows = sorted(copies.values(), key=lambda row: row['path'])
     absent = [row for row in rows if not row['here']]
@@ -1390,6 +1414,7 @@ def show_files(config, missing: bool, from_date: str | None, as_json: bool):
 
     if not snapshots:
         print(f'{yellow("safekeep:")} no restorable snapshots at {cyan(str(dest))}')
+        print(f'  take one: {cyan(f"{safekeep_for(config_path)} backup run")}')
         return
 
     read_from = f'snapshot {cyan(snapshots[0][0].name)}' if from_date else f'{plural(len(snapshots), "snapshot")}'
@@ -1420,7 +1445,7 @@ def show_files(config, missing: bool, from_date: str | None, as_json: bool):
 
     if absent:
         first = absent[0]
-        restore = f'safekeep restore --to / --from {first["snapshot"]} --source {shell_path(first["path"])}'
+        restore = f'{safekeep_for(config_path)} restore --to / --from {first["snapshot"]} --source {shell_path(first["path"])}'
         print(f'\n  restore one: {cyan(restore)}')
     if unreadable:
         report_unreadable(unreadable)
@@ -1543,28 +1568,28 @@ def pick_sources(snapshot_dir, manifest, config_path):
 PREVIEW_FILE_LIMIT = 200
 
 
-def show_snapshot_source_files(dest, date, source, as_json=False):
-    """The files a snapshot holds for one source — also the fzf preview pane."""
+def show_snapshot_source_files(dest, date, source, config_path, as_json=False):
+    """The files a snapshot holds for one source — also the fzf preview pane, which exits 0 on a miss."""
     snapshot_dir = resolve_snapshot(dest, date)
     manifest = read_manifest(snapshot_dir) if snapshot_dir else None
     if manifest is None:
         if as_json:
-            unreadable_snapshot(dest, date)
-        print('no manifest — not restorable by safekeep')
+            fail_unreadable(dest, date, snapshot_dir, config_path)
+        print(unreadable_reason(dest, date, snapshot_dir, config_path))
         return
 
     home_then = manifest.get('home')
     home_now = str(Path.home())
     wanted = normalized_needle(source)
-    row = next(
-        (row for row in source_rows(manifest.get('groups', [])) if wanted in source_names(row['source'], home_then, home_now)),
-        None,
-    )
+    rows = source_rows(manifest.get('groups', []))
+    row = next((row for row in rows if wanted in source_names(row['source'], home_then, home_now)), None)
     if row is None:
+        held = ', '.join(tilde(remap_home(row['source'], home_then, home_now)) for row in rows)
+        miss = f'{source} is not a source in {snapshot_dir.name}\nIts sources: {held}'
         if as_json:
-            print(f'{red("safekeep:")} {yellow(source)} is not a source in {cyan(snapshot_dir.name)}', file=sys.stderr)
+            print(f'{red("safekeep:")} {miss}', file=sys.stderr)
             sys.exit(1)
-        print(f'{source} is not in {date}')
+        print(miss)
         return
     source = row['source']
 
@@ -2016,20 +2041,21 @@ def apply_modes(manifest, entries, dry_run):
     return changed, recorded
 
 
-def explain_empty_selection(manifest, date, request: RestoreRequest):
+def explain_empty_selection(manifest, date, request: RestoreRequest, config_path):
     """Say why an explicit selection matched nothing in this snapshot.
 
     Tags live in the manifest, not in the config -- each one is a copy of what the config said
     on the day the snapshot was taken. Tagging an entry today does not retag the snapshots that
     already exist, and that is the whole of why a restore comes back empty while the config
-    plainly carries the tag. Nothing in "nothing selected" said so.
+    plainly carries the tag.
     """
     groups = manifest.get('groups', [])
     if request.tag:
         available = sorted({tag for group in groups for tag in group.get('tags', [])})
+        compare = f'{safekeep_for(config_path)} tags list --from {date}'
         print(f'  no source in {cyan(date)} carries {yellow(", ".join(request.tag))}', file=sys.stderr)
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
-        print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags list")} compares the two', file=sys.stderr)
+        print(f'  a snapshot carries the tags its config had that day. {cyan(compare)} compares the two', file=sys.stderr)
     if request.source:
         needles = yellow(', '.join(request.source))
         home_then, home_now = manifest.get('home'), str(Path.home())
@@ -2070,29 +2096,32 @@ def do_restore(config, config_path, request: RestoreRequest):
         restorable = [d for d, m in list_snapshots(dest) if m is not None]
         if not restorable:
             print(f'{red("safekeep:")} no restorable snapshots at {cyan(str(dest))}', file=sys.stderr)
+            print(f'  take one: {cyan(f"{safekeep_for(config_path)} backup run")}', file=sys.stderr)
             sys.exit(1)
         date = restorable[0].name
 
     snapshot_dir = resolve_snapshot(dest, date)
-    if snapshot_dir is None:
-        print(f'{red("safekeep:")} no snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
+    manifest = read_manifest(snapshot_dir) if snapshot_dir else None
+    if manifest is None:
+        print(f'{red("safekeep:")} {unreadable_reason(dest, date, snapshot_dir, config_path)}', file=sys.stderr)
+        if snapshot_dir is not None:
+            rsync = f'rsync -av {shell_path(str(snapshot_dir))}/ {shell_path(request.to)}'
+            print(f'  copy it out with rsync, without the modes a manifest would restore: {cyan(rsync)}', file=sys.stderr)
         sys.exit(1)
     # A --from naming a day resolves to the last run of it, so the rest of this reports the name
     # that was resolved rather than the one that was typed.
     date = snapshot_dir.name
 
-    manifest = read_manifest(snapshot_dir)
-    if manifest is None:
-        print(f'{red("safekeep:")} snapshot {yellow(date)} has no manifest — safekeep cannot restore it', file=sys.stderr)
-        print(f'  copy it out with rsync directly: {cyan(f"rsync -av {snapshot_dir}/ /")}', file=sys.stderr)
-        sys.exit(1)
-
     groups = select_groups(manifest, request)
     if groups is None:
         if not can_prompt(request.no_input):
-            print(f'{red("safekeep:")} nothing selected — pass {cyan("--all")}, {cyan("--source")}, or {cyan("--tag")}', file=sys.stderr)
+            print(f'{red("safekeep:")} which sources from {cyan(date)}? This run cannot ask, so name them', file=sys.stderr)
+            print(f'  with {cyan("--all")}, {cyan("--source PATH")} or {cyan("--tag NAME")}. The snapshot holds:', file=sys.stderr)
+            home_then, home_now = manifest.get('home'), str(Path.home())
             for row in source_rows(manifest.get('groups', [])):
-                print(f'  {kinds_label(row["kinds"]):<20} {row["source"]}', file=sys.stderr)
+                source = tilde(remap_home(row['source'], home_then, home_now))
+                tags = f'  {green(" ".join(row["tags"]))}' if row['tags'] else ''
+                print(f'  {kinds_label(row["kinds"]):<20} {source}{tags}', file=sys.stderr)
             sys.exit(1)
         require_fzf()
         rows = pick_sources(snapshot_dir, manifest, config_path)
@@ -2108,7 +2137,7 @@ def do_restore(config, config_path, request: RestoreRequest):
         # exit non-zero so a caller cannot read it as a restore that happened to be empty.
         if request.all or request.source or request.tag:
             print(f'{red("safekeep:")} nothing selected, nothing restored', file=sys.stderr)
-            explain_empty_selection(manifest, date, request)
+            explain_empty_selection(manifest, date, request, config_path)
             sys.exit(1)
         print(f'{yellow("safekeep:")} nothing selected, nothing restored')
         return
@@ -2276,14 +2305,21 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
     excludes = config.get('skip_names_matching', DEFAULT_SKIP_NAMES)
     max_size_mb = config.get('skip_files_over_mb')
 
-    try:
-        dest.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        print(f'{red("safekeep:")} cannot create destination {yellow(str(dest))} — {e}', file=sys.stderr)
+    # Checked against the nearest directory that exists, so a dry run can answer without creating it.
+    nearest = next(path for path in (dest, *dest.parents) if path.exists())
+    if not os.access(nearest, os.W_OK):
+        problem = 'is not writable' if nearest == dest else f'cannot be created, because {nearest} is not writable'
+        print(f'{red("safekeep:")} destination {yellow(str(dest))} {problem}', file=sys.stderr)
         sys.exit(1)
-    if not os.access(dest, os.W_OK):
-        print(f'{red("safekeep:")} destination {yellow(str(dest))} is not writable', file=sys.stderr)
-        sys.exit(1)
+    if request.dry_run:
+        if nearest != dest:
+            print(f'  {yellow("would create")} {cyan(str(dest))}', flush=True)
+    else:
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f'{red("safekeep:")} cannot create destination {yellow(str(dest))} — {e}', file=sys.stderr)
+            sys.exit(1)
 
     snapshot_name = dt.datetime.now().strftime(SNAPSHOT_FORMAT)
     dest_base = dest / snapshot_name

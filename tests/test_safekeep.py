@@ -777,7 +777,7 @@ def test_a_dry_run_records_no_label(tmp_path, source_tree):
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     result = run_safekeep('--config', str(config_path), 'backup', 'run', '-n', '--label', 'never written')
     assert result.returncode == 0
-    assert not any(dest.iterdir()), 'a dry run creates the destination base and no snapshot in it'
+    assert not dest.exists()
 
 
 def test_backup_by_unknown_tag_is_a_usage_error(tmp_path, source_tree):
@@ -899,8 +899,10 @@ def test_backup_records_config_warnings_in_manifest(tmp_path, source_tree):
 def test_dry_run_writes_nothing(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup', 'run', '--dry-run')
-    assert not any(dest.iterdir())
+    result = run_safekeep('--config', str(config_path), 'backup', 'run', '--dry-run')
+    assert result.returncode == 0, result.stderr
+    assert not dest.exists()
+    assert f'would create {dest}' in result.stdout
 
 
 def test_backup_does_not_prune_old_snapshots(tmp_path, source_tree):
@@ -1264,6 +1266,82 @@ def test_the_restore_pickers_previews_read_a_config_passed_as_a_file(tmp_path, s
         assert 'no config' not in result.stderr
 
 
+def test_a_snapshot_list_counts_one_file_and_one_source_in_the_singular(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'solo.conf'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    out = run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout
+    assert '1 snapshot at' in out
+    assert re.search(r'\b1 file\s+1 source\b', out), out
+
+
+@pytest.mark.parametrize(
+    ('args', 'code'),
+    [
+        (('snapshots', 'show', '2020-01-01'), 0),
+        (('snapshots', 'show', '2020-01-01', '--json'), 1),
+        (('snapshots', 'show', '2020-01-01', '--source', 'x'), 0),
+        (('files', 'list', '--from', '2020-01-01'), 1),
+        (('tags', 'list', '--from', '2020-01-01'), 1),
+        (('--no-input', 'restore', '--to', 'unused', '--from', '2020-01-01', '--all'), 1),
+    ],
+)
+def test_every_read_of_an_absent_snapshot_names_it_and_the_ones_there_are(tmp_path, source_tree, args, code):
+    """Exit 0 only where the read doubles as the restore picker's preview pane."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+
+    result = run_safekeep('--config', str(config_path), *args)
+    assert result.returncode == code, result.stderr
+    said = result.stdout + result.stderr
+    assert f'no snapshot 2020-01-01 at {dest}' in said
+    assert f'{latest_snapshot(dest).name}  (newest)' in said
+
+
+def test_a_source_the_snapshot_lacks_is_named_beside_the_ones_it_holds(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = matrix_config(tmp_path, dest, source_tree)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+
+    result = run_safekeep('--config', str(config_path), 'snapshots', 'show', latest_snapshot(dest).name, '--source', '/nowhere')
+    assert result.returncode == 0
+    assert '/nowhere is not a source in' in result.stdout
+    assert str(source_tree / 'solo.conf') in result.stdout
+
+
+def test_with_two_configs_each_printed_hint_names_the_config_it_read(tmp_path, source_tree):
+    home = tmp_path / 'home'
+    named_config(home, 'laptop', tmp_path / 'dest', back_up_paths=[{'path': str(source_tree / 'notes'), 'tags': ['docs']}])
+    named_config(home, 'work', tmp_path / 'other')
+    env = home_env(home)
+    run_safekeep('-c', 'laptop', 'backup', 'run', env=env)
+
+    listed = run_safekeep('-c', 'laptop', 'tags', 'list', env=env)
+    shown = run_safekeep(*printed_after('what one tag covers:', listed.stdout), env=env)
+    assert shown.returncode == 0, shown.stderr
+
+    restore = printed_after('restore it:', shown.stdout)
+    assert restore[:2] == ['-c', 'laptop']
+    rehearsed = run_safekeep(*restore, '-n', env=env)
+    assert rehearsed.returncode == 0, rehearsed.stderr
+    assert 'would restore 1 source' in rehearsed.stdout
+
+
+def test_a_verbs_option_typed_before_the_verb_prints_the_command_with_it_after(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+
+    result = run_safekeep('--config', str(config_path), 'backup', '--dry-run', env=home_env(tmp_path, COLUMNS='1000'))
+    assert result.returncode == 2
+    retry = next(line for line in result.stderr.splitlines() if 'backup run --dry-run' in line).strip('│ ')
+    assert printed(retry) == ['--config', str(config_path), 'backup', 'run', '--dry-run']
+
+    previewed = run_safekeep(*printed(retry))
+    assert previewed.returncode == 0, previewed.stderr
+    assert 'would back up' in previewed.stdout
+
+
 def test_an_exact_name_beats_a_prefix(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
@@ -1558,9 +1636,15 @@ def test_files_names_a_file_where_it_belongs_on_this_machine(tmp_path, source_tr
 
 
 def test_files_hands_over_the_restore_that_brings_one_back(tmp_path, source_tree):
+    """Run with -n added, so the proof that it runs as printed writes nothing."""
     config_path, _ = two_machines(tmp_path, source_tree)
-    out = plain(run_safekeep('--config', str(config_path), 'files', 'list', '--missing').stdout)
-    assert 'safekeep restore --to / --from 2020-01-01 --source ' in out
+    out = run_safekeep('--config', str(config_path), 'files', 'list', '--missing').stdout
+    restore = printed_after('restore one:', out)
+    assert restore[restore.index('--from') + 1] == '2020-01-01'
+
+    rehearsed = run_safekeep(*restore, '-n')
+    assert rehearsed.returncode == 0, rehearsed.stderr
+    assert 'would restore 1 path inside a source' in rehearsed.stdout
 
 
 def test_an_empty_files_listing_is_an_empty_array(tmp_path, source_tree):
@@ -1712,9 +1796,12 @@ def test_restore_with_a_selection_and_no_to_prints_a_rehearsal_that_runs_as_prin
 
 
 def test_restore_without_selection_is_an_error_when_not_a_tty(tmp_path, source_tree):
+    """The error names the snapshot it would read, and each source in it with its tags."""
     restore, _ = backup_and_restore(tmp_path, source_tree)
     assert restore.returncode == 1
-    assert 'nothing selected' in restore.stderr
+    snapshot = latest_snapshot(tmp_path / 'dest').name
+    assert f'which sources from {snapshot}?' in restore.stderr
+    assert re.search(r'solo\.conf\s+docs secrets', restore.stderr), restore.stderr
 
 
 def test_restore_all_reproduces_content_and_modes(tmp_path, source_tree):
