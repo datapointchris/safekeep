@@ -87,10 +87,19 @@ DEFAULT_SKIP_NAMES = [
     '.terraform',
 ]
 
-CONFIG_DIR = Path.home() / '.config' / 'safekeep'
 
-# Where every command the tool prints for a reader to rehearse a restore aims it.
-REHEARSAL_ROOT = '/tmp/restore-test'
+def xdg_home(variable, fallback):
+    """An XDG base directory: the variable when it holds an absolute path, else its default under home."""
+    value = os.environ.get(variable, '')
+    return Path(value) if os.path.isabs(value) else Path.home() / fallback
+
+
+CONFIG_DIR = xdg_home('XDG_CONFIG_HOME', '.config') / 'safekeep'
+
+# Where every command the tool prints for a reader to rehearse a restore aims it. A cache, because
+# deleting it costs nothing, and the user's own, where a fixed path under /tmp is shared with
+# every account on the machine.
+REHEARSAL_ROOT = xdg_home('XDG_CACHE_HOME', '.cache') / 'safekeep' / 'rehearsal'
 
 # How many snapshot names an error lists before it hands over to `snapshots list`.
 SNAPSHOT_CHOICES_SHOWN = 5
@@ -312,39 +321,74 @@ def warn_about_json_configs():
         print(f'    {path.name} -> {path.stem}.toml', file=sys.stderr)
 
 
-def resolve_config(name):
-    """Resolve config by name, absolute path, or auto-detect single config."""
-    if name:
-        path = Path(name)
-        if path.is_absolute() and path.exists():
+def names_a_path(name):
+    """Whether a config was named by a file rather than by name: a directory part, a ~, or a .toml suffix."""
+    return os.sep in name or name.startswith('~') or name.endswith('.toml')
+
+
+def config_names():
+    return sorted(path.stem for path in CONFIG_DIR.glob('*.toml')) if CONFIG_DIR.exists() else []
+
+
+def print_first_config_route():
+    """How to get a first config, including the case of a machine that has only the backup drive."""
+    print(f'  write one: {cyan("safekeep config init")}', file=sys.stderr)
+    print('  to read an existing backup drive, set its back_up_to to the directory holding the snapshots.', file=sys.stderr)
+    print('  a restore needs nothing else from the config', file=sys.stderr)
+
+
+def holds_snapshots(directory):
+    try:
+        return any(child.is_dir() and SNAPSHOT_NAME.fullmatch(child.name) for child in directory.iterdir())
+    except OSError:
+        return False
+
+
+def resolve_config(name, typed=()):
+    """The config file a command reads: named, at a path, or the only one there is.
+
+    `typed` is the command line as given, so the error for an ambiguous config can print it back
+    with the one missing flag added.
+    """
+    if name and names_a_path(name):
+        path = Path(name).expanduser()
+        if path.is_dir():
+            print(f'{red("safekeep:")} {yellow(str(path))} is a directory, and -c takes a config name or a .toml file', file=sys.stderr)
+            if holds_snapshots(path):
+                print('  it holds snapshots. To read them, write a config whose back_up_to is this directory:', file=sys.stderr)
+                print(f'    {cyan("safekeep config init drive")}', file=sys.stderr)
+                print(f'    {cyan("safekeep -c drive config edit")}', file=sys.stderr)
+                print('  a restore needs nothing else from the config', file=sys.stderr)
+            sys.exit(2)
+        if path.is_file():
             return path
+        print(f'{red("safekeep:")} no config file at {yellow(str(path))}', file=sys.stderr)
+        print(f'  write one there: {cyan(f"safekeep config init {shell_path(str(path))}")}', file=sys.stderr)
+        sys.exit(1)
+
+    if name:
         config_path = CONFIG_DIR / f'{name}.toml'
         if config_path.exists():
             return config_path
-        print(f'{red("safekeep:")} config not found: {yellow(name)}', file=sys.stderr)
-        print(f'  looked in: {cyan(str(config_path))}', file=sys.stderr)
+        print(f'{red("safekeep:")} no config named {yellow(name)} in {cyan(str(CONFIG_DIR))}', file=sys.stderr)
+        known = config_names()
+        print(f'  configs: {green(", ".join(known)) if known else yellow("none")}', file=sys.stderr)
         warn_about_json_configs()
-        print(f'  generate it: {cyan(f"safekeep config init {name}")}', file=sys.stderr)
+        print(f'  write a new one: {cyan(f"safekeep config init {shlex.quote(name)}")}', file=sys.stderr)
         sys.exit(1)
 
-    if not CONFIG_DIR.exists():
-        print(f'{red("safekeep:")} no config directory at {cyan(str(CONFIG_DIR))}', file=sys.stderr)
-        print(f'  generate a starter config: {cyan("safekeep config init")}', file=sys.stderr)
-        sys.exit(1)
-
-    configs = sorted(CONFIG_DIR.glob('*.toml'))
+    configs = config_names()
     if not configs:
-        print(f'{red("safekeep:")} no configs found in {cyan(str(CONFIG_DIR))}', file=sys.stderr)
+        print(f'{red("safekeep:")} no configs in {cyan(str(CONFIG_DIR))}', file=sys.stderr)
         warn_about_json_configs()
-        print(f'  generate a starter config: {cyan("safekeep config init")}', file=sys.stderr)
+        print_first_config_route()
         sys.exit(1)
     if len(configs) == 1:
-        return configs[0]
+        return CONFIG_DIR / f'{configs[0]}.toml'
 
-    print(f'{yellow("safekeep:")} multiple configs found, specify one with {cyan("--config")}:', file=sys.stderr)
-    for c in configs:
-        print(f'  {green(c.stem)}', file=sys.stderr)
-    sys.exit(1)
+    print(f'{red("safekeep:")} {len(configs)} configs, so name one before the command: {green(", ".join(configs))}', file=sys.stderr)
+    print(f'  {cyan(shlex.join(["safekeep", "-c", configs[0], *typed]))}', file=sys.stderr)
+    sys.exit(2)
 
 
 def load_config(config_path):
@@ -1238,7 +1282,7 @@ def show_tag(config, config_path, name: str, from_date: str | None, as_json: boo
         print(f'  {"":<9} {"":<{width}}  {bold(sized_total(rows))}')
 
     from_flag = f' --from {from_date}' if from_date else ''
-    print(f'\n  restore it: {cyan(f"safekeep restore --to {REHEARSAL_ROOT}{from_flag} --tag {name}")}')
+    print(f'\n  restore it: {cyan(f"safekeep restore --to {shell_path(str(REHEARSAL_ROOT))}{from_flag} --tag {name}")}')
 
 
 def restorable_snapshots(dest, date):
@@ -1407,17 +1451,25 @@ def fzf(lines, args):
     return [line for line in result.stdout.splitlines() if line]
 
 
-def pick_snapshot(dest, config_name):
+def preview_safekeep(config_path):
+    """The safekeep an fzf preview pane runs, reading the config this run resolved.
+
+    `-m safekeep` rather than this file's path: as a package, __file__ is
+    src/safekeep/__init__.py, and running that directly re-imports the module
+    under the name __main__ instead of resolving the installed package. The config goes by
+    its path, because a config passed as a file has no name that resolves to it.
+    """
+    return shlex.join([sys.executable, '-m', 'safekeep', '-c', str(config_path)])
+
+
+def pick_snapshot(dest, config_path):
     """Interactively choose a snapshot, previewing each one's manifest."""
     snapshots = [(d, m) for d, m in list_snapshots(dest) if m is not None]
     if not snapshots:
         print(f'{red("safekeep:")} no restorable snapshots at {cyan(str(dest))}', file=sys.stderr)
         sys.exit(1)
 
-    # `-m safekeep` rather than this file's path: as a package, __file__ is
-    # src/safekeep/__init__.py, and running that directly re-imports the module
-    # under the name __main__ instead of resolving the installed package.
-    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {{2}}'
+    preview_cmd = f'{preview_safekeep(config_path)} snapshots show {{2}}'
 
     # One preformatted column block with the raw name hidden behind it, the same arrangement
     # pick_sources uses: fzf renders a tab as a tab stop rather than aligning a column, and a
@@ -1448,7 +1500,7 @@ def pick_snapshot(dest, config_name):
     return selected[0].split('\t')[1]
 
 
-def pick_sources(snapshot_dir, manifest, config_name):
+def pick_sources(snapshot_dir, manifest, config_path):
     """Interactively choose sources, previewing the files the snapshot holds for each."""
     rows = source_rows(manifest.get('groups', []))
     if not rows:
@@ -1465,7 +1517,7 @@ def pick_sources(snapshot_dir, manifest, config_name):
         for row in rows
     ]
 
-    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {snapshot_dir.name} --source {{2}}'
+    preview_cmd = f'{preview_safekeep(config_path)} snapshots show {snapshot_dir.name} --source {{2}}'
     selected = fzf(
         lines,
         [
@@ -2010,7 +2062,7 @@ def do_restore(config, config_path, request: RestoreRequest):
         date = request.from_date
     elif can_prompt(request.no_input) and not (request.all or request.source or request.tag):
         require_fzf()
-        date = pick_snapshot(dest, config_path.stem)
+        date = pick_snapshot(dest, config_path)
         if date is None:
             print(f'{yellow("safekeep:")} nothing selected, nothing restored')
             return
@@ -2043,7 +2095,7 @@ def do_restore(config, config_path, request: RestoreRequest):
                 print(f'  {kinds_label(row["kinds"]):<20} {row["source"]}', file=sys.stderr)
             sys.exit(1)
         require_fzf()
-        rows = pick_sources(snapshot_dir, manifest, config_path.stem)
+        rows = pick_sources(snapshot_dir, manifest, config_path)
     else:
         rows = source_rows(groups)
         if not request.all:
@@ -2374,24 +2426,33 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
 
 
 def init_config(name):
-    """Generate an example config file."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config_path = CONFIG_DIR / f'{name}.toml'
+    """Write the annotated example as a new config, by name or at a path."""
+    if names_a_path(name):
+        config_path = Path(name).expanduser()
+        if not config_path.parent.is_dir():
+            print(f'{red("safekeep:")} no directory {yellow(str(config_path.parent))} to write {config_path.name} into', file=sys.stderr)
+            sys.exit(1)
+        flag = shell_path(str(config_path))
+    else:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        config_path = CONFIG_DIR / f'{name}.toml'
+        flag = shlex.quote(name)
 
     if config_path.exists():
         print(f'{yellow("safekeep:")} config already exists: {cyan(str(config_path))}', file=sys.stderr)
-        print(f'  use {cyan("safekeep config show")} to view it, or edit directly', file=sys.stderr)
+        print(f'  change it: {cyan(f"safekeep -c {flag} config edit")}', file=sys.stderr)
         sys.exit(1)
 
     config_path.write_text(CONFIG_TEMPLATE)
 
     print(f'{green("safekeep:")} created {cyan(str(config_path))}')
     print()
-    print('  Edit the file to match your backup needs, then preview with:')
-    print(f'    {cyan(f"safekeep --config {name} backup --dry-run")}')
-    print()
-    print('  Config format reference:')
-    print(f'    {cyan("safekeep --help")}')
+    print('  set back_up_to and the sources, then see what a backup would copy:')
+    print(f'    {cyan(f"safekeep -c {flag} config edit")}')
+    print(f'    {cyan(f"safekeep -c {flag} backup run -n")}')
+    print(f'  every key, explained: {cyan("safekeep config example")}')
+    if not names_a_path(name) and len(config_names()) > 1:
+        print(f'  with more than one config, every command names one: {cyan(f"safekeep -c {flag} …")}')
 
 
 def edit_config(config_path):

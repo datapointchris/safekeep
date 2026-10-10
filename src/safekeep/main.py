@@ -7,6 +7,7 @@ fails the type check rather than a run.
 """
 
 import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -29,6 +30,7 @@ from safekeep import init_config
 from safekeep import load_config
 from safekeep import resolve_config
 from safekeep import resolve_tag_index
+from safekeep import shell_path
 from safekeep import show_config
 from safekeep import show_files
 from safekeep import show_snapshot_list
@@ -43,6 +45,9 @@ from safekeep import tool_version
 # writes anything. The notice and the command share this config so the notice cannot name a release
 # the command would not install.
 UPDATE_CONFIG = Config(tool='safekeep', owner='datapointchris')
+
+# The rehearsal directory as a command line carries it: under ~ where it can be, so it reads short.
+REHEARSE_INTO = shell_path(str(REHEARSAL_ROOT))
 
 
 def examples(*rows: tuple[str, str]) -> str:
@@ -89,7 +94,7 @@ app = typer.Typer(
         ('safekeep snapshots show 2026-08-13', 'what one snapshot holds'),
         ('safekeep files list --missing', 'what older snapshots hold that this machine lacks'),
         ('safekeep tags show secrets', 'what that tag would bring back'),
-        ('safekeep restore --to /tmp/restore-test --all', 'rehearse a restore'),
+        (f'safekeep restore --to {REHEARSE_INTO} --all', 'rehearse a restore'),
         ('safekeep restore --to / --tag secrets', 'restore one tag for real'),
     ),
 )
@@ -107,9 +112,18 @@ def invocation(ctx: typer.Context) -> Invocation:
     return ctx.find_root().obj
 
 
+def config_file(ctx: typer.Context) -> Path:
+    """The config the root options name, or the only one there is.
+
+    The command line goes along so that, with several configs and no `-c`, the error can print it
+    back with `-c` added.
+    """
+    return resolve_config(invocation(ctx).config, typed=sys.argv[1:])
+
+
 def loaded(ctx: typer.Context):
     """(config path, config, warnings) for the config the root options name."""
-    config_path = resolve_config(invocation(ctx).config)
+    config_path = config_file(ctx)
     config, warnings = load_config(config_path)
     return config_path, config, warnings
 
@@ -130,23 +144,23 @@ def rehearsal(
 ) -> str:
     """The restore as it was typed, aimed at a scratch directory, for an error that has to name one."""
     root = invocation(ctx)
-    words = ['safekeep']
+    head = ['safekeep']
     if root.config:
-        words += ['-c', root.config]
+        head += ['-c', root.config]
     if root.no_input:
-        words.append('--no-input')
-    words += ['restore', '--to', REHEARSAL_ROOT]
-    if from_date:
-        words += ['--from', from_date]
+        head.append('--no-input')
+    head.append('restore')
+    tail = ['--from', from_date] if from_date else []
     selection = (['--all'] if all_sources else []) + [w for s in sources for w in ('--source', s)] + [w for t in tags for w in ('--tag', t)]
-    words += selection or ['--all']
+    tail += selection or ['--all']
     if on_conflict != ConflictPolicy.BACKUP:
-        words += ['--on-conflict', on_conflict.value]
+        tail += ['--on-conflict', on_conflict.value]
     if skip_symlinked:
-        words.append('--skip-symlinked')
+        tail.append('--skip-symlinked')
     if dry_run:
-        words.append('-n')
-    return shlex.join(words)
+        tail.append('-n')
+    # Joined apart from the rest because shlex.join would quote the tilde, and a quoted one never expands.
+    return f'{shlex.join(head)} --to {REHEARSE_INTO} {shlex.join(tail)}'
 
 
 def version_callback(asked: bool) -> None:
@@ -161,7 +175,12 @@ def root(
     ctx: typer.Context,
     config: Annotated[
         str | None,
-        typer.Option('--config', '-c', metavar='NAME|PATH', help='Config to use, by name or path (default: auto-detect)'),
+        typer.Option(
+            '--config',
+            '-c',
+            metavar='NAME|PATH',
+            help='Which config to read: a name, or a .toml file. Needed only when there is more than one',
+        ),
     ] = None,
     no_input: Annotated[bool, typer.Option('--no-input', help='Never prompt; fail naming the flag that would have answered')] = False,
     version: Annotated[
@@ -421,7 +440,7 @@ def tags_show(
     no_args_is_help=True,
     rich_help_panel='Restore',
     epilog=examples(
-        ('safekeep restore --to /tmp/restore-test --all', 'rehearse first, always'),
+        (f'safekeep restore --to {REHEARSE_INTO} --all', 'rehearse first, always'),
         ('safekeep restore --to / --tag secrets', 'restore one tag for real'),
         ('safekeep restore --to / --from 2026-07-01 --all', 'restore an older snapshot'),
         ('safekeep restore --to / --from 2026-07-01 --source ~/.ssh/config', 'bring back one file'),
@@ -434,7 +453,7 @@ def restore(
         typer.Option(
             '--to',
             metavar='PATH',
-            help=f'Required. Root to restore into: `/` for a real restore, or a scratch directory such as `{REHEARSAL_ROOT}` to rehearse',
+            help=f'Required. Root to restore into: `/` for a real restore, or a scratch directory such as `{REHEARSE_INTO}` to rehearse',
             show_default=False,
         ),
     ] = None,
@@ -477,12 +496,14 @@ def restore(
     decision, `[y]es [N]o [a]ll [k]eep all [q]uit`, and keeps no copies, since you were asked.
     """
     sources = (source or []) + (group or [])
+    # Resolved before the --to check: with several configs and no -c, a rehearsal printed first would fail as printed.
+    config_path, config, _ = loaded(ctx)
     if to is None:
         rehearse = rehearsal(ctx, from_date, all_sources, sources, tag or [], on_conflict, skip_symlinked, dry_run)
         ctx.fail(f'Missing --to: the root to restore into. --to / puts files back where they were.\nRehearse this one first: {rehearse}')
-    config_path, config, _ = loaded(ctx)
     request = RestoreRequest(
-        to=to,
+        # Expanded here because no shell expands a quoted ~, or one after --to= in zsh.
+        to=str(Path(to).expanduser()),
         from_date=from_date,
         all=all_sources,
         source=sources,
@@ -532,7 +553,7 @@ def config_edit(ctx: typer.Context) -> None:
     """Open the config in $VISUAL or $EDITOR, then check it."""
     # Resolved but not loaded: a config that fails to load is the main reason to open one, and
     # load_config exits before the editor could fix it.
-    edit_config(resolve_config(invocation(ctx).config))
+    edit_config(config_file(ctx))
 
 
 @config_app.command(
@@ -544,7 +565,7 @@ def config_edit(ctx: typer.Context) -> None:
 )
 def config_init(
     ctx: typer.Context,
-    name: Annotated[str, typer.Argument(metavar='NAME', help='Name of the config to write; `-c` overrides it')] = 'default',
+    name: Annotated[str, typer.Argument(metavar='NAME|PATH', help='A name, or a .toml file to write. `-c` overrides it')] = 'default',
 ) -> None:
     """Write a starter config."""
     init_config(invocation(ctx).config or name)

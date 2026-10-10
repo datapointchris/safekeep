@@ -21,13 +21,13 @@ safekeep backup run --dry-run   # Preview what would be copied
 safekeep backup run             # Copy the configured paths into a new snapshot
 safekeep backup run --tag wip   # Copy only the entries tagged 'wip'
 
-safekeep snapshots list                   # What is at the destination
-safekeep snapshots show 2026-08-13        # What one snapshot holds
-safekeep files list --missing             # What older snapshots hold that this machine lacks
-safekeep tags list                        # Which tags exist, and what each would restore
-safekeep tags show wip                    # The sources one tag covers
-safekeep restore --to /tmp/restore-test   # Rehearse: pick a snapshot and sources
-safekeep restore --to / --tag wip         # Restore everything tagged 'wip'
+safekeep snapshots list                             # What is at the destination
+safekeep snapshots show 2026-08-13                  # What one snapshot holds
+safekeep files list --missing                       # What older snapshots hold that this machine lacks
+safekeep tags list                                  # Which tags exist, and what each would restore
+safekeep tags show wip                              # The sources one tag covers
+safekeep restore --to ~/.cache/safekeep/rehearsal   # Rehearse: pick a snapshot and sources
+safekeep restore --to / --tag wip                   # Restore everything tagged 'wip'
 ```
 
 **The verb comes last, and no node acts until one selects it.** That is the no-args-shows-help rule
@@ -57,7 +57,9 @@ here and in `go mod init`.
 
 ## Config
 
-Config files live at `~/.config/safekeep/<name>.toml`. If only one config exists, it auto-loads. With multiple configs, specify which one with `--config`, which is global and goes before the command: `safekeep --config work backup run`.
+Config files live in `$XDG_CONFIG_HOME/safekeep/`, which is `~/.config/safekeep/` when the variable is unset, one `<name>.toml` each. With one config, every command reads it. With several, `-c NAME` picks one, and it goes before the command: `safekeep -c work backup run`. A command run without it prints itself back with `-c` added, naming the configs there are.
+
+`-c` also takes a path to a `.toml` file anywhere. That is the route on a new machine that has only the backup drive: a config holding nothing but `back_up_to` reads every snapshot on it and restores any of them. Pointing `-c` at the snapshot directory itself is an error that says so.
 
 `safekeep config init` writes a complete annotated starter config, and `safekeep config example` prints the same content to stdout without touching the filesystem — which is what you want when the question is "what does that key look like" rather than "set me up". The shape it produces:
 
@@ -325,7 +327,7 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
                            [--dry-run] [--on-conflict POLICY] [--skip-symlinked]
 ```
 
-`--to` is required. `--to /` is a real restore; `--to /tmp/restore-test` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed.
+`--to` is required. `--to /` is a real restore; `--to ~/.cache/safekeep/rehearsal` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed. That is the directory every printed rehearsal names, under `$XDG_CACHE_HOME` when it is set. It is a cache because deleting it costs nothing. It is the user's own because a fixed path under `/tmp` is shared with every account on the machine, which could create it first. A `~` in `--to` is expanded even where the shell left it alone, as zsh does after `--to=`.
 
 **A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
 

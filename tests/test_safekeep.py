@@ -45,25 +45,39 @@ def paths(*entries):
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 
-def run_safekeep(*args, env=None):
+def run_safekeep(*args, env=None, cwd=None):
     """Invoke the script as a subprocess, the way a user does, with color stripped from both streams.
 
     Typer forces a color terminal whenever GITHUB_ACTIONS is set, so its help and usage errors carry
     escapes in CI that they never carry in a local pipe.
     """
-    result = subprocess.run([sys.executable, '-m', 'safekeep', *args], capture_output=True, text=True, env=env)
+    result = subprocess.run([sys.executable, '-m', 'safekeep', *args], capture_output=True, text=True, env=env, cwd=cwd)
     return subprocess.CompletedProcess(result.args, result.returncode, plain(result.stdout), plain(result.stderr))
 
 
 def editor_writing(tmp_path, content):
-    """A stand-in $EDITOR: a script that replaces the file it is handed with `content`."""
+    """A stand-in $EDITOR: a script that replaces the file it is handed with `content`.
+
+    $VISUAL is dropped because it outranks $EDITOR, and a real one would open mid-test.
+    """
     script = tmp_path / 'fake-editor.py'
     script.write_text(f'import pathlib\nimport sys\n\npathlib.Path(sys.argv[1]).write_text({content!r})\n')
-    return {**os.environ, 'EDITOR': f'{sys.executable} {script}'}
+    env = {key: value for key, value in os.environ.items() if key != 'VISUAL'}
+    return {**env, 'EDITOR': f'{sys.executable} {script}'}
 
 
 def plain(text):
     return ANSI.sub('', text)
+
+
+@pytest.fixture(autouse=True)
+def config_and_cache_follow_home(monkeypatch):
+    """A test that moves HOME moves the config and cache directories with it.
+
+    An exported XDG variable would otherwise keep pointing every run at the real ones.
+    """
+    for variable in ('XDG_CONFIG_HOME', 'XDG_CACHE_HOME'):
+        monkeypatch.delenv(variable, raising=False)
 
 
 @pytest.fixture
@@ -73,8 +87,7 @@ def source_tree(tmp_path):
     Restore branches on directory vs single file, and again on whether the source itself was a
     symlink; backup branches on the mode deviations worth recording and on what the excludes
     drop. All three shapes are groups in `matrix_config` below, so the restore tests cross the
-    whole matrix instead of one corner of it — which is what a single-directory fixture gave
-    for a long time, leaving restore_group's file branch with no caller at all.
+    whole matrix instead of one corner of it.
     """
     src = tmp_path / 'src'
     (src / 'notes').mkdir(parents=True)
@@ -141,7 +154,7 @@ def test_restore_help_works_without_the_option_it_documents(tmp_path):
     result = run_safekeep('restore', '--help')
     assert result.returncode == 0
     assert '--to' in result.stdout
-    assert 'restore-test' in result.stdout, 'the help for --to points at rehearsing, not just at the flag'
+    assert 'rehearse' in result.stdout, 'the help for --to points at rehearsing, not just at the flag'
     for selection in ('--all', '--source', '--tag'):
         assert selection in result.stdout
 
@@ -398,6 +411,163 @@ def test_leftover_json_configs_are_named_rather_than_reported_as_absent(tmp_path
     err = plain(capsys.readouterr().err)
     assert 'configs are TOML now' in err
     assert 'work.json -> work.toml' in err
+
+
+def home_env(home, **extra):
+    return {**os.environ, 'HOME': str(home), **extra}
+
+
+def printed(command):
+    """A command safekeep printed for the reader to run, as words, without the leading `safekeep`."""
+    words = shlex.split(command)
+    assert words[0] == 'safekeep', command
+    return words[1:]
+
+
+def printed_after(label, text):
+    """The command on the line where `label` precedes it."""
+    line = next(line for line in text.splitlines() if label in line)
+    return printed(line.split(label, 1)[1])
+
+
+def printed_line_containing(fragment, text):
+    return printed(next(line for line in text.splitlines() if fragment in line))
+
+
+def named_config(home, name, dest, **extra):
+    config_dir = home / '.config' / 'safekeep'
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / f'{name}.toml').write_text(tomli_w.dumps({'back_up_to': str(dest), **extra}))
+
+
+def test_a_directory_given_as_the_config_names_the_commands_that_read_its_snapshots(tmp_path, source_tree):
+    """A new machine with only the drive: the first thing tried is pointing -c at the snapshots."""
+    dest = tmp_path / 'drive'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    home = tmp_path / 'new-machine'
+    home.mkdir()
+
+    result = run_safekeep('-c', str(dest), 'snapshots', 'list', env=home_env(home))
+    assert result.returncode == 2
+    assert 'Traceback' not in result.stderr
+    assert 'it holds snapshots' in result.stderr
+
+    init, edit = (printed(line) for line in result.stderr.splitlines() if line.strip().startswith('safekeep '))
+    assert run_safekeep(*init, env=home_env(home)).returncode == 0
+    edited = run_safekeep(*edit, env={**editor_writing(tmp_path, f'back_up_to = "{dest}"\n'), 'HOME': str(home)})
+    assert edited.returncode == 0, edited.stderr
+
+    listed = run_safekeep(*edit[:2], 'snapshots', 'list', env=home_env(home))
+    assert listed.returncode == 0, listed.stderr
+    assert latest_snapshot(dest).name in listed.stdout
+
+
+def test_a_config_named_by_a_missing_file_prints_the_command_that_writes_it_there(tmp_path):
+    home = tmp_path / 'home'
+    home.mkdir()
+    wanted = tmp_path / 'kept elsewhere.toml'
+
+    result = run_safekeep('-c', str(wanted), 'snapshots', 'list', env=home_env(home))
+    assert result.returncode == 1
+    assert 'Traceback' not in result.stderr
+
+    written = run_safekeep(*printed_after('write one there:', result.stderr), env=home_env(home))
+    assert written.returncode == 0, written.stderr
+    assert wanted.read_text() == safekeep.CONFIG_TEMPLATE
+
+
+def test_restore_expands_a_tilde_in_to_that_no_shell_expanded(tmp_path, source_tree):
+    """zsh leaves the ~ in `--to=~/restored` alone, and so does every shell when it is quoted."""
+    dest = tmp_path / 'dest'
+    config_path = matrix_config(tmp_path, dest, source_tree)
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    home = tmp_path / 'home'
+    home.mkdir()
+    workdir = tmp_path / 'workdir'
+    workdir.mkdir()
+
+    result = run_safekeep(
+        '--config', str(config_path), '--no-input', 'restore', '--to=~/restored', '--all', env=home_env(home), cwd=workdir
+    )
+    assert result.returncode == 0, result.stderr
+    assert any((home / 'restored').rglob('plain.md'))
+    assert not (workdir / '~').exists()
+
+
+def test_configs_are_read_from_xdg_config_home_when_it_is_set(tmp_path):
+    elsewhere = tmp_path / 'xdg-config'
+    config_dir = elsewhere / 'safekeep'
+    config_dir.mkdir(parents=True)
+    (config_dir / 'only.toml').write_text(tomli_w.dumps({'back_up_to': str(tmp_path / 'dest')}))
+    home = tmp_path / 'home'
+    home.mkdir()
+
+    result = run_safekeep('config', 'show', env=home_env(home, XDG_CONFIG_HOME=str(elsewhere)))
+    assert result.returncode == 0, result.stderr
+    assert str(config_dir / 'only.toml') in result.stdout
+
+
+def test_an_unknown_config_name_lists_the_configs_there_are(tmp_path):
+    home = tmp_path / 'home'
+    named_config(home, 'work', tmp_path / 'dest')
+    named_config(home, 'laptop', tmp_path / 'dest')
+
+    result = run_safekeep('-c', 'wrok', 'snapshots', 'list', env=home_env(home))
+    assert result.returncode == 1
+    assert 'configs: laptop, work' in result.stderr
+
+
+def test_with_several_configs_the_error_prints_the_command_again_naming_one(tmp_path, source_tree):
+    home = tmp_path / 'home'
+    named_config(home, 'laptop', tmp_path / 'dest', back_up_paths=paths(source_tree / 'notes'))
+    named_config(home, 'work', tmp_path / 'other')
+    run_safekeep('-c', 'laptop', 'backup', 'run', env=home_env(home))
+
+    result = run_safekeep('--no-input', 'restore', '--tag', 'x', '-n', env=home_env(home))
+    assert result.returncode == 2
+    assert 'laptop, work' in result.stderr
+    retried = printed(result.stderr.splitlines()[1])
+    assert retried == ['-c', 'laptop', '--no-input', 'restore', '--tag', 'x', '-n']
+
+    rehearsal = run_safekeep(*retried, env=home_env(home, COLUMNS='1000'))
+    assert 'Rehearse this one first: safekeep -c laptop --no-input restore --to' in rehearsal.stderr
+
+
+def test_config_init_prints_commands_that_run_as_printed(tmp_path, source_tree):
+    home = tmp_path / 'home'
+    named_config(home, 'laptop', tmp_path / 'dest')
+
+    result = run_safekeep('config', 'init', 'work', env=home_env(home))
+    assert result.returncode == 0, result.stderr
+    assert 'safekeep -c work …' in result.stdout, 'a second config says every command must now name one'
+
+    edit = printed_line_containing('config edit', result.stdout)
+    replacement = tomli_w.dumps({'back_up_to': str(tmp_path / 'dest'), 'back_up_paths': paths(source_tree / 'notes')})
+    edited = run_safekeep(*edit, env={**editor_writing(tmp_path, replacement), 'HOME': str(home)})
+    assert edited.returncode == 0, edited.stderr
+
+    previewed = run_safekeep(*printed_line_containing('backup run -n', result.stdout), env=home_env(home))
+    assert previewed.returncode == 0, previewed.stderr
+    assert 'would' in previewed.stdout
+
+    example = printed_after('every key, explained:', result.stdout)
+    assert run_safekeep(*example, env=home_env(home)).stdout == safekeep.CONFIG_TEMPLATE
+
+
+def test_config_init_writes_a_config_at_a_path_that_then_reads_by_that_path(tmp_path):
+    home = tmp_path / 'home'
+    home.mkdir()
+    target = tmp_path / 'drive.toml'
+
+    result = run_safekeep('config', 'init', str(target), env=home_env(home))
+    assert result.returncode == 0, result.stderr
+    assert target.read_text() == safekeep.CONFIG_TEMPLATE
+    assert not (home / '.config' / 'safekeep' / 'drive.toml').exists()
+
+    again = run_safekeep('config', 'init', str(target), env=home_env(home))
+    assert again.returncode == 1
+    assert printed_after('change it:', again.stderr) == ['-c', str(target), 'config', 'edit']
 
 
 # --- surveying ------------------------------------------------------------------------
@@ -1034,7 +1204,7 @@ def test_a_listing_of_both_name_shapes_keeps_its_columns(tmp_path, source_tree):
 def test_the_snapshot_picker_hides_a_typeable_name_behind_its_columns(tmp_path, source_tree, monkeypatch):
     """fzf renders a tab as a tab stop rather than aligning a column, so the visible half is one
     preformatted block and the name rides in field 2. Everything downstream opens that field, and
-    a padded block is not a path — which is exactly what broke when the layout last changed."""
+    a padded block is not a path."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     run_safekeep('--config', str(config_path), 'backup', 'run')
@@ -1048,12 +1218,50 @@ def test_the_snapshot_picker_hides_a_typeable_name_behind_its_columns(tmp_path, 
         return [lines[0]]
 
     monkeypatch.setattr(safekeep, 'fzf', fake_fzf)
-    assert safekeep.pick_snapshot(dest, config_path.stem) == wanted
+    assert safekeep.pick_snapshot(dest, config_path) == wanted
 
     shown = [line.split('\t')[0] for line in captured['lines']]
     assert len({block.index('source') for block in shown}) == 1, shown
     preview = captured['args'][captured['args'].index('--preview') + 1]
     assert preview.endswith('{2}'), 'the preview pane opens the name, not the padded block'
+
+
+def test_the_restore_pickers_previews_read_a_config_passed_as_a_file(tmp_path, source_tree, monkeypatch):
+    """The config here sits outside the config directory, so only its path finds it again."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    snapshot = latest_snapshot(dest).name
+
+    previews = []
+
+    def fake_fzf(lines, args):
+        previews.append(args[args.index('--preview') + 1])
+        return [lines[0]]
+
+    monkeypatch.setattr(safekeep, 'fzf', fake_fzf)
+    monkeypatch.setattr(safekeep, 'can_prompt', lambda no_input: True)
+    monkeypatch.setattr(safekeep, 'require_fzf', lambda: None)
+    config, _ = safekeep.load_config(config_path)
+    request = safekeep.RestoreRequest(
+        to=str(tmp_path / 'restored'),
+        from_date=None,
+        all=False,
+        source=[],
+        tag=[],
+        on_conflict=safekeep.ConflictPolicy.BACKUP,
+        skip_symlinked=False,
+        dry_run=True,
+        no_input=False,
+    )
+    safekeep.do_restore(config, config_path, request)
+
+    assert len(previews) == 2, 'one pane for the snapshot, one for its sources'
+    for preview, field in zip(previews, (snapshot, str(source_tree / 'notes')), strict=True):
+        words = shlex.split(preview.replace('{2}', shlex.quote(field)))
+        result = subprocess.run(words, capture_output=True, text=True, env=home_env(tmp_path / 'home'))
+        assert result.returncode == 0, result.stderr
+        assert 'no config' not in result.stderr
 
 
 def test_an_exact_name_beats_a_prefix(tmp_path, source_tree):
