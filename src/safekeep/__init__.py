@@ -1144,13 +1144,19 @@ def snapshot_sources(manifest):
     return sources
 
 
+NOT_IN_CONFIG = 'not in the config'
+TAGGED_IN_SNAPSHOT_ONLY = 'tagged in the snapshot only'
+TAGGED_IN_CONFIG_ONLY = 'tagged in the config only'
+
+
 def tag_index(config, sources):
     """{tag: [row]} over the config and a snapshot together.
 
-    Either side alone hides one of the two ways a tagged restore comes back empty: a tag added
-    since the snapshot was taken selects nothing in it, and a tag renamed in the config is still
-    the only name the snapshots taken before the rename answer to. A row's 'files' is None when
-    the source is not in the snapshot at all, which is the first case.
+    Either side alone hides one of the ways a tagged restore comes back empty: a tag added since
+    the snapshot was taken selects nothing in it, and a tag renamed in the config is still the
+    only name the snapshots taken before the rename answer to. A row's 'files' is None when the
+    source is not in the snapshot at all. A source the snapshot holds without the tag is noted
+    TAGGED_IN_CONFIG_ONLY, since a restore selects on the snapshot's tags and skips it.
     """
     index = {}
     entries = {str(path): (kind, tags) for kind, path, tags in config_entries(config)}
@@ -1160,9 +1166,11 @@ def tag_index(config, sources):
         stored = sources.get(source)
         for tag in dict.fromkeys(config_tags + (stored['tags'] if stored else [])):
             if source not in entries:
-                note = 'not in the config'
+                note = NOT_IN_CONFIG
             elif tag not in config_tags:
-                note = 'tagged in the snapshot only'
+                note = TAGGED_IN_SNAPSHOT_ONLY
+            elif stored and tag not in stored['tags']:
+                note = TAGGED_IN_CONFIG_ONLY
             else:
                 note = ''
             index.setdefault(tag, []).append(
@@ -1177,9 +1185,14 @@ def tag_index(config, sources):
     return index
 
 
+def selected_by_tag(row):
+    """Whether `restore --tag` brings this row back: the snapshot holds the source and tags it."""
+    return row['files'] is not None and row['note'] != TAGGED_IN_CONFIG_ONLY
+
+
 def sized_total(rows):
-    """The files and bytes rows account for in the snapshot, ignoring those not in it."""
-    sized = [row for row in rows if row['files'] is not None]
+    """The files and bytes a restore by the tag brings back, from the rows it selects."""
+    sized = [row for row in rows if selected_by_tag(row)]
     if not sized:
         return None
     return size_cell(sum(row['files'] for row in sized), sum(row['bytes'] for row in sized))
@@ -1200,9 +1213,9 @@ def tilde(source):
 def print_tag_sources(config_path, dest, snapshot_dir):
     """Name the two sides a tag listing is read from, since a tag can be on either alone."""
     if snapshot_dir is None:
-        print(f'  in {cyan(config_path.name)} — {yellow("no snapshots")} at {cyan(str(dest))} to restore by tag yet')
+        print(f'  from {cyan(config_path.name)}. No snapshots at {cyan(str(dest))} yet, so a restore by tag has nothing to read')
     else:
-        print(f'  in {cyan(config_path.name)}, sized against snapshot {cyan(snapshot_dir.name)}')
+        print(f"  from {cyan(config_path.name)} and snapshot {cyan(snapshot_dir.name)}. A restore by tag reads the snapshot's tags")
 
 
 def resolve_tag_index(config, config_path, from_date: str | None):
@@ -1243,22 +1256,25 @@ def show_tag_list(config, config_path, from_date: str | None, as_json: bool):
     width = max(len(tag) for tag in index)
     for tag in sorted(index):
         rows = index[tag]
-        # A tag half of whose sources are missing still shows a size, and the size is the part
-        # that reads as reassuring -- so the shortfall is named on the same row rather than left
-        # to be noticed by drilling in. With no snapshot at all the header has said so already.
-        missing = [row for row in rows if row['files'] is None]
+        # A tag that skips some of its sources still shows a size, and the size is the part that
+        # reads as reassuring -- so the shortfall is named on the same row rather than left to be
+        # noticed by drilling in. With no snapshot at all the header has said so already.
+        skipped = len([row for row in rows if not selected_by_tag(row)])
         if snapshot_dir is None:
             sizes = ''
-        elif len(missing) == len(rows):
-            sizes = yellow('not in this snapshot')
+        elif skipped == len(rows):
+            sizes = yellow('restores nothing from this snapshot')
         else:
-            shortfall = f'  {yellow(f"{len(missing)} not in this snapshot")}' if missing else ''
+            shortfall = f'  {yellow("skips " + plural(skipped, "source"))}' if skipped else ''
             sizes = f'{sized_total(rows)}{shortfall}'
         print(f'  {green(f"{tag:<{width}}")}  {plural(len(rows), "source"):<12}{sizes}'.rstrip())
 
-    untagged = [path for _, path, tags in config_entries(config) if not tags]
+    # Counted in the snapshot, because its tags are the ones a restore selects on.
+    held = snapshot_sources(read_manifest(snapshot_dir)) if snapshot_dir else {}
+    untagged = [source for source, stored in held.items() if not stored['tags']]
     if untagged:
-        print(f'\n  untagged: {plural(len(untagged), "source")} — only {cyan("--all")} or {cyan("--source")} reaches them')
+        reach = f'only {cyan("--all")} or {cyan("--source")} restores them'
+        print(f'\n  untagged in this snapshot: {plural(len(untagged), "source")}, so {reach}')
     print(f'\n  what one tag covers: {cyan(f"{safekeep_for(config_path)} tags show {shlex.quote(sorted(index)[0])}")}')
 
 
@@ -1267,7 +1283,8 @@ def show_tag(config, config_path, name: str, from_date: str | None, as_json: boo
     index, dest, snapshot_dir = resolve_tag_index(config, config_path, from_date)
     rows = index.get(name)
     if not rows:
-        print(f'{red("safekeep:")} no tag {yellow(name)} in {cyan(config_path.name)}', file=sys.stderr)
+        snapshot = f' or snapshot {cyan(snapshot_dir.name)}' if snapshot_dir else ''
+        print(f'{red("safekeep:")} no tag {yellow(name)} in {cyan(config_path.name)}{snapshot}', file=sys.stderr)
         if index:
             print(f'  tags: {green(", ".join(sorted(index)))}', file=sys.stderr)
         sys.exit(2)
@@ -1284,18 +1301,35 @@ def show_tag(config, config_path, name: str, from_date: str | None, as_json: boo
     for row in rows:
         if snapshot_dir is None:
             sizes = ''
+        elif row['files'] is None:
+            sizes = yellow('absent from this snapshot')
         else:
-            sizes = size_cell(row['files'], row['bytes']) if row['files'] is not None else yellow('not in this snapshot')
+            sizes = size_cell(row['files'], row['bytes'])
         note = f'  {yellow(row["note"])}' if row['note'] else ''
         print(f'  {row["kind"]:<9} {tilde(row["source"]):<{width}}  {sizes}{note}'.rstrip())
 
+    selected = [row for row in rows if selected_by_tag(row)]
     # A total under a single row is the same number twice.
-    if len([row for row in rows if row['files'] is not None]) > 1:
+    if len(selected) > 1:
         print(f'  {"":<9} {"":<{width}}  {bold(sized_total(rows))}')
+    if snapshot_dir is None:
+        return
 
-    from_flag = f' --from {shlex.quote(from_date)}' if from_date else ''
-    restore = f'{safekeep_for(config_path)} restore --to {shell_path(str(REHEARSAL_ROOT))}{from_flag} --tag {shlex.quote(name)}'
-    print(f'\n  restore it: {cyan(restore)}')
+    # Pinned with --from, so the command restores the snapshot sized here even after a newer run.
+    command = safekeep_for(config_path)
+    rehearse = f'{command} restore --to {shell_path(str(REHEARSAL_ROOT))} --from {snapshot_dir.name}'
+    if selected:
+        print(f'\n  restore it: {cyan(f"{rehearse} --tag {shlex.quote(name)}")}')
+        return
+    held = [row for row in rows if row['files'] is not None]
+    if not held:
+        print(f'\n  none of its sources are in {cyan(snapshot_dir.name)}')
+        print(f'  take a snapshot that holds them: {cyan(f"{command} backup run")}')
+        return
+    sources = ' '.join(f'--source {shell_path(row["source"])}' for row in held)
+    print(f'\n  {cyan(snapshot_dir.name)} holds these sources without the tag, so a restore by {green(name)} selects nothing in it.')
+    print(f'  restore them by path: {cyan(f"{rehearse} {sources}")}')
+    print(f'  or take a snapshot that tags them: {cyan(f"{command} backup run")}')
 
 
 def restorable_snapshots(dest, date, config_path):

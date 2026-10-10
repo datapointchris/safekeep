@@ -1485,8 +1485,26 @@ def test_tags_flags_a_tag_the_snapshot_predates(tmp_path, source_tree):
 
     tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', ['wsl']))
     out = plain(run_safekeep('--config', str(config_path), 'tags', 'list').stdout)
-    assert 'wsl' in out
-    assert 'not in this snapshot' in out
+    assert re.search(r'wsl\s+1 source\s+restores nothing from this snapshot', out), out
+
+
+def test_a_tag_added_to_a_source_the_snapshot_holds_offers_the_restore_by_path(tmp_path, source_tree):
+    """The snapshot holds the files but not the tag, so a size alone would promise a restore that selects nothing."""
+    dest = tmp_path / 'dest'
+    config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    tagged(tmp_path, dest, (source_tree / 'notes', ['docs', 'wsl']))
+
+    listed = run_safekeep('--config', str(config_path), 'tags', 'list').stdout
+    assert re.search(r'wsl\s+1 source\s+restores nothing from this snapshot', listed), listed
+
+    shown = run_safekeep('--config', str(config_path), 'tags', 'show', 'wsl')
+    assert 'tagged in the config only' in shown.stdout
+    assert '--tag wsl' not in shown.stdout
+    by_path = printed_after('restore them by path:', shown.stdout)
+    rehearsed = run_safekeep(*by_path, '-n', env=home_env(tmp_path / 'home'))
+    assert rehearsed.returncode == 0, rehearsed.stderr
+    assert 'would restore 1 source' in rehearsed.stdout
 
 
 def test_tags_keeps_listing_a_tag_the_config_dropped(tmp_path, source_tree):
@@ -1508,8 +1526,10 @@ def test_tags_names_the_restore_that_would_bring_one_back(tmp_path, source_tree)
     run_safekeep('--config', str(config_path), 'backup', 'run')
 
     out = plain(run_safekeep('--config', str(config_path), 'tags', 'show', 'docs').stdout)
-    assert '--tag docs' in out
     assert str(source_tree / 'notes') in out
+    rehearsed = run_safekeep(*printed_after('restore it:', out), '-n', env=home_env(tmp_path / 'home'))
+    assert rehearsed.returncode == 0, rehearsed.stderr
+    assert 'would restore 1 source' in rehearsed.stdout
 
 
 def test_tags_from_sizes_against_the_snapshot_named(tmp_path, source_tree):
@@ -1533,11 +1553,14 @@ def test_unknown_tag_lists_the_ones_that_exist(tmp_path, source_tree):
 
 def test_tags_counts_the_sources_no_tag_reaches(tmp_path, source_tree):
     """An untagged source is restorable only with --all or --source, which is worth knowing
-    before a rebuild rather than during one."""
+    before a rebuild rather than during one. The count is the snapshot's, whose tags a restore reads."""
     dest = tmp_path / 'dest'
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', []))
-    out = plain(run_safekeep('--config', str(config_path), 'tags', 'list').stdout)
-    assert 'untagged: 1 source' in out
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    assert 'untagged in this snapshot: 1 source' in run_safekeep('--config', str(config_path), 'tags', 'list').stdout
+
+    tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', ['wsl']))
+    assert 'untagged in this snapshot: 1 source' in run_safekeep('--config', str(config_path), 'tags', 'list').stdout
 
 
 def test_tags_works_before_the_first_backup(tmp_path, source_tree):
@@ -1545,7 +1568,7 @@ def test_tags_works_before_the_first_backup(tmp_path, source_tree):
     config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
     result = run_safekeep('--config', str(config_path), 'tags', 'list')
     assert result.returncode == 0
-    assert 'no snapshots' in plain(result.stdout)
+    assert f'No snapshots at {dest} yet' in result.stdout
 
 
 def test_a_bare_string_tag_is_fatal(tmp_path, source_tree):
