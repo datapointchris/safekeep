@@ -228,6 +228,11 @@ def plural(count, noun):
     return f'{count} {noun}' if count == 1 else f'{count} {noun}s'
 
 
+def print_json(value):
+    """Emit a read's --json answer, the only thing it writes to stdout."""
+    print(json.dumps(value, indent=2))
+
+
 def human_size(num_bytes):
     if num_bytes >= 1024**3:
         return f'{num_bytes / 1024**3:.2f} GB'
@@ -877,8 +882,28 @@ def snapshot_name_width(snapshots):
     return max((len(snapshot_dir.name) for snapshot_dir, _ in snapshots), default=0)
 
 
-def show_snapshot_list(dest):
+def snapshot_summary(snapshot_dir, manifest):
+    """One snapshot as `snapshots list` reports it. A manifestless one is known by its name alone."""
+    summary = {'snapshot': snapshot_dir.name, 'restorable': manifest is not None}
+    if manifest is None:
+        return summary | dict.fromkeys(('created', 'host', 'label', 'files', 'bytes', 'source_count', 'linked_from'))
+    groups = manifest.get('groups', [])
+    return summary | {
+        'created': manifest.get('created'),
+        'host': manifest.get('hostname'),
+        'label': manifest.get('label'),
+        'files': sum(g.get('files', 0) for g in groups),
+        'bytes': sum(g.get('bytes', 0) for g in groups),
+        'source_count': len(source_rows(groups)),
+        'linked_from': manifest.get('linked_from'),
+    }
+
+
+def show_snapshot_list(dest, as_json=False):
     snapshots = list_snapshots(dest)
+    if as_json:
+        print_json([snapshot_summary(snapshot_dir, manifest) for snapshot_dir, manifest in snapshots])
+        return
     if not snapshots:
         print(f'{yellow("safekeep:")} no snapshots at {cyan(str(dest))}')
         return
@@ -891,33 +916,67 @@ def show_snapshot_list(dest):
     width = snapshot_name_width(snapshots)
     for snapshot_dir, manifest in snapshots:
         name = f'{snapshot_dir.name:<{width}}'
-        if manifest is None:
+        summary = snapshot_summary(snapshot_dir, manifest)
+        if not summary['restorable']:
             print(f'  {bold(name)}  {yellow("no manifest — not restorable by safekeep")}')
             continue
-        groups = manifest.get('groups', [])
-        total_bytes = sum(g.get('bytes', 0) for g in groups)
-        total_files = sum(g.get('files', 0) for g in groups)
-        host = manifest.get('hostname', '?')
-        sources = len(source_rows(groups))
-        cells = f'{name}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {host}'
-        row = f'  {bold(name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}'
+        host = summary['host'] or '?'
+        sizes = f'{human_size(summary["bytes"]):>9}  {summary["files"]:>6} files  {summary["source_count"]:>2} sources'
+        cells = f'{name}  {sizes}  {host}'
+        row = f'  {bold(name)}  {sizes}  {cyan(host)}'
         # Free text of any length, so it goes last and is clipped against the columns before it:
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
         # one of them is not at the left. On a terminal only, for the reason `status` gives --
         # a redirected run has no width to fit and loses data if one is assumed. clip measures
         # uncolored text, which is what `cells` is for.
-        if manifest.get('label'):
-            row += '  ' + green(clip_to_terminal(manifest['label'], len(cells) + 4))
+        if summary['label']:
+            row += '  ' + green(clip_to_terminal(summary['label'], len(cells) + 4))
         print(row)
 
 
-def show_snapshot_record(dest, date):
+def unreadable_snapshot(dest, date):
+    """Fail a --json read of one snapshot that is absent or has no manifest.
+
+    The fzf preview pane prints these cases on stdout and succeeds, because a pane has nowhere
+    else to show them. A caller reading JSON has to be able to tell them from an answer.
+    """
+    print(f'{red("safekeep:")} no restorable snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
+    sys.exit(1)
+
+
+def show_snapshot_record(dest, date, as_json=False):
     """What one snapshot holds, as the manifest records it — also the fzf preview pane."""
     snapshot_dir = resolve_snapshot(dest, date)
+    manifest = read_manifest(snapshot_dir) if snapshot_dir else None
+    if as_json:
+        if manifest is None:
+            unreadable_snapshot(dest, date)
+        home_then = manifest.get('home')
+        home_now = str(Path.home())
+        print_json(
+            snapshot_summary(snapshot_dir, manifest)
+            | {
+                'config_name': manifest.get('config_name'),
+                'home': home_then,
+                'sources': [
+                    {
+                        'source': remap_home(row['source'], home_then, home_now),
+                        'recorded': row['source'],
+                        'kinds': [KIND_LABELS.get(kind, kind) for kind in row['kinds']],
+                        'tags': row['tags'],
+                        'files': row['files'],
+                        'bytes': row['bytes'],
+                    }
+                    for row in source_rows(manifest.get('groups', []))
+                ],
+                'skipped_large': manifest.get('skipped_large', []),
+                'config_warnings': manifest.get('config_warnings', []),
+            }
+        )
+        return
     if snapshot_dir is None:
         print(f'no snapshot {date} at {dest}')
         return
-    manifest = read_manifest(snapshot_dir)
     if manifest is None:
         print('no manifest — not restorable by safekeep')
         return
@@ -1060,9 +1119,21 @@ def resolve_tag_index(config, args):
     return tag_index(config, snapshot_sources(manifest)), dest, snapshot_dir
 
 
+def tag_record(name, rows, snapshot_dir):
+    """One tag as --json reports it: its sources, sized against the snapshot named beside them."""
+    return {
+        'tag': name,
+        'snapshot': snapshot_dir.name if snapshot_dir else None,
+        'sources': [row | {'note': row['note'] or None} for row in rows],
+    }
+
+
 def show_tag_list(config, config_path, args):
     """List the tags a restore can select on, and what each would bring back."""
     index, dest, snapshot_dir = resolve_tag_index(config, args)
+    if args.as_json:
+        print_json([tag_record(name, index[name], snapshot_dir) for name in sorted(index)])
+        return
 
     print(f'{bold("safekeep:")} {plural(len(index), "tag")}')
     print_tag_sources(config_path, dest, snapshot_dir)
@@ -1105,6 +1176,10 @@ def show_tag(config, config_path, args):
             print(f'  tags: {green(", ".join(sorted(index)))}', file=sys.stderr)
         sys.exit(2)
 
+    if args.as_json:
+        print_json(tag_record(name, rows, snapshot_dir))
+        return
+
     print(f'{bold("safekeep:")} tag {green(name)} covers {bold(plural(len(rows), "source"))}')
     print_tag_sources(config_path, dest, snapshot_dir)
     print()
@@ -1124,6 +1199,147 @@ def show_tag(config, config_path, args):
 
     from_flag = f' --from {args.from_date}' if args.from_date else ''
     print(f'\n  restore it: {cyan(f"safekeep restore --to /tmp/rehearsal{from_flag} --tag {name}")}')
+
+
+def restorable_snapshots(dest, date):
+    """Every snapshot with a manifest, newest first, or only the one `date` names."""
+    if date is None:
+        return [(d, m) for d, m in list_snapshots(dest) if m is not None]
+    return [snapshot_to_size_against(dest, date)]
+
+
+def snapshot_files(snapshot_dir, manifest, unreadable):
+    """(path on this machine, path as recorded, stored copy) for every file one snapshot holds.
+
+    Path sources record no file list in the manifest, so the snapshot's own tree is walked. The
+    path is remapped through this machine's home, which is what lets a file from a WSL image with
+    another username be recognized as the one this machine lacks. A directory the walk cannot
+    list goes into `unreadable`.
+    """
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    for row in source_rows(manifest.get('groups', [])):
+        for origin, is_dir in stored_paths(snapshot_dir, row['source'], unreadable):
+            if not is_dir:
+                yield remap_home(str(origin), home_then, home_now), str(origin), snapshot_dir / snapshot_rel(origin)
+
+
+def newest_copies(snapshots, progress):
+    """({path on this machine: row}, unreadable) over every file the snapshots hold.
+
+    The snapshots arrive newest first, so the first one a path turns up in holds the copy a
+    restore would bring back. Every later sighting is an older copy of the same file.
+
+    `unreadable` names each directory the walk could not list and each file it could not stat.
+    The files beneath them are absent from the rows, so a listing that left them out of its
+    verdict would call a partly read snapshot clean.
+    """
+    copies = {}
+    unreadable = []
+    read = 0
+    for position, (snapshot_dir, manifest) in enumerate(snapshots, start=1):
+        for path, recorded, stored in snapshot_files(snapshot_dir, manifest, unreadable):
+            read += 1
+            if progress and read % 200 == 0:
+                status(f'reading snapshot {position} of {len(snapshots)} … {plural(read, "file")}')
+            if path in copies:
+                continue
+            try:
+                size = stored.stat().st_size
+            except OSError:
+                unreadable.append(str(stored))
+                continue
+            copies[path] = {
+                'path': path,
+                'recorded': recorded,
+                'here': os.path.lexists(path),
+                'snapshot': snapshot_dir.name,
+                'label': manifest.get('label'),
+                'host': manifest.get('hostname'),
+                'bytes': size,
+                'stored': str(stored),
+            }
+    if progress:
+        clear_status()
+    return copies, unreadable
+
+
+def report_unreadable(unreadable):
+    """Name what a listing could not read, and fail the run, since its rows are incomplete."""
+    sys.stdout.flush()
+    print(f'\n{red("safekeep:")} {plural(len(unreadable), "path")} in the snapshots could not be read:', file=sys.stderr)
+    for path in unreadable[:10]:
+        print(f'  {path}', file=sys.stderr)
+    if len(unreadable) > 10:
+        print(f'  ... and {len(unreadable) - 10} more', file=sys.stderr)
+    print(f'  anything {"it holds" if len(unreadable) == 1 else "they hold"} is missing from this listing', file=sys.stderr)
+    sys.exit(1)
+
+
+def shell_path(path):
+    """A path as it can be pasted into a command: abbreviated, unless that would need quoting.
+
+    Quoting a tilde stops the shell expanding it, so a path that needs quotes is printed whole.
+    shlex counts the tilde itself as unsafe, which is why only what follows it is checked.
+    """
+    short = tilde(path)
+    if short != path and shlex.quote(short[1:]) == short[1:]:
+        return short
+    return shlex.quote(path)
+
+
+def show_files(config, args):
+    """Every file the snapshots hold, one line each, grouped under the newest snapshot holding it."""
+    dest = Path(config['back_up_to']).expanduser()
+    snapshots = restorable_snapshots(dest, args.from_date)
+    copies, unreadable = newest_copies(snapshots, progress=not args.as_json)
+    rows = sorted(copies.values(), key=lambda row: row['path'])
+    absent = [row for row in rows if not row['here']]
+    if args.missing:
+        rows = absent
+
+    if args.as_json:
+        print_json(rows)
+        if unreadable:
+            report_unreadable(unreadable)
+        return
+
+    if not snapshots:
+        print(f'{yellow("safekeep:")} no restorable snapshots at {cyan(str(dest))}')
+        return
+
+    read_from = f'snapshot {cyan(snapshots[0][0].name)}' if args.from_date else f'{plural(len(snapshots), "snapshot")}'
+    partly = f', {red(f"{plural(len(unreadable), 'path')} unreadable")}' if unreadable else ''
+    if args.missing and not rows:
+        every = 'every file it could read' if unreadable else 'every file'
+        print(f'{bold("safekeep:")} {every} in {read_from} is on this machine{partly}')
+    elif args.missing:
+        verb = 'is' if len(rows) == 1 else 'are'
+        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from} {verb} not on this machine{partly}')
+    else:
+        shortfall = f', {yellow(f"{len(absent)} not on this machine")}' if absent else ', every one on this machine'
+        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from}{shortfall}{partly}')
+    print(f'  at {cyan(str(dest))}' if args.from_date else f'  at {cyan(str(dest))}, each from the newest snapshot holding it')
+
+    # Grouped under the snapshot rather than repeating it on every row: the snapshot is what a
+    # restore names with --from, and its label is what says which machine the files came off.
+    for snapshot_dir, manifest in snapshots:
+        held = [row for row in rows if row['snapshot'] == snapshot_dir.name]
+        if not held:
+            continue
+        heading = f'{snapshot_dir.name}  {manifest.get("hostname", "?")}'
+        label = f'  {green(clip_to_terminal(manifest["label"], len(heading) + 4))}' if manifest.get('label') else ''
+        print(f'\n  {bold(snapshot_dir.name)}  {cyan(manifest.get("hostname", "?"))}{label}')
+        for row in held:
+            note = '' if row['here'] or args.missing else f'  {yellow("not on this machine")}'
+            print(f'    {human_size(row["bytes"]):>9}  {tilde(row["path"])}{note}')
+
+    if absent:
+        first = absent[0]
+        restore = f'safekeep restore --to / --from {first["snapshot"]} --source {shell_path(first["path"])}'
+        print(f'\n  restore one: {cyan(restore)}')
+    if unreadable:
+        report_unreadable(unreadable)
 
 
 def require_fzf():
@@ -1235,20 +1451,46 @@ def pick_sources(snapshot_dir, manifest, config_name):
 PREVIEW_FILE_LIMIT = 200
 
 
-def show_snapshot_source_files(dest, date, source):
+def show_snapshot_source_files(dest, date, source, as_json=False):
     """The files a snapshot holds for one source — also the fzf preview pane."""
     snapshot_dir = resolve_snapshot(dest, date)
     manifest = read_manifest(snapshot_dir) if snapshot_dir else None
     if manifest is None:
+        if as_json:
+            unreadable_snapshot(dest, date)
         print('no manifest — not restorable by safekeep')
         return
 
-    row = next((row for row in source_rows(manifest.get('groups', [])) if row['source'] == source), None)
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    wanted = normalized_needle(source)
+    row = next(
+        (row for row in source_rows(manifest.get('groups', [])) if wanted in source_names(row['source'], home_then, home_now)),
+        None,
+    )
     if row is None:
+        if as_json:
+            print(f'{red("safekeep:")} {yellow(source)} is not a source in {cyan(snapshot_dir.name)}', file=sys.stderr)
+            sys.exit(1)
         print(f'{source} is not in {date}')
         return
+    source = row['source']
 
     kinds = file_kinds(manifest)
+    if as_json:
+        # Every file rather than the preview's first PREVIEW_FILE_LIMIT: the cap is for a pane.
+        files = [origin for origin, is_dir in stored_paths(snapshot_dir, source) if not is_dir]
+        print_json(
+            [
+                {
+                    'path': remap_home(str(origin), home_then, home_now),
+                    'recorded': str(origin),
+                    'kind': kinds.get(snapshot_rel(origin)),
+                }
+                for origin in files
+            ]
+        )
+        return
     print(f'{kinds_label(row["kinds"])}   {plural(row["files"], "file")}   {human_size(row["bytes"])}')
     if row['tags']:
         print(f'tags: {", ".join(row["tags"])}')
@@ -1264,7 +1506,11 @@ def show_snapshot_source_files(dest, date, source):
 
 
 def select_groups(manifest, args):
-    """Resolve which groups to restore from flags, or None if selection is interactive."""
+    """Resolve which groups to restore from flags, or None if selection is interactive.
+
+    A --source is matched against each source both as recorded and as this machine names it, so
+    a path copied out of `files list` still matches a snapshot taken under another home.
+    """
     groups = manifest.get('groups', [])
     if args.all:
         return groups
@@ -1272,13 +1518,63 @@ def select_groups(manifest, args):
     if not args.source and not args.tag:
         return None
 
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    needles = [normalized_needle(needle) for needle in args.source]
     selected = []
     for group in groups:
-        matched_source = any(needle in group['source'] for needle in args.source)
+        names = source_names(group['source'], home_then, home_now)
+        matched_source = any(needle in name for needle in needles for name in names)
         matched_tag = any(tag in group.get('tags', []) for tag in args.tag)
         if matched_source or matched_tag:
             selected.append(group)
     return selected
+
+
+def rows_inside_sources(snapshot_dir, manifest, needles):
+    """A row for each --source naming a file or directory inside a source, covering only that path.
+
+    The needle is a path as this machine names it, which is how `files list` prints one, or as
+    the snapshot recorded it, which is how `snapshots show` prints one. Either is mapped onto the
+    recorded source before it is looked up. 'within' is the source it sits in: the restore creates
+    the directories between the two, and gives them the modes it recorded.
+    """
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    rows = {}
+    for needle in needles:
+        wanted = normalized_needle(needle)
+        if not os.path.isabs(wanted):
+            continue
+        for group in manifest.get('groups', []):
+            source = group['source']
+            named = next(
+                (name for name in source_names(source, home_then, home_now) if wanted.startswith(name.rstrip('/') + '/')),
+                None,
+            )
+            if named is None:
+                continue
+            origin = os.path.normpath(source) + wanted[len(named) :]
+            if not (snapshot_dir / snapshot_rel(origin)).exists():
+                continue
+            row = rows.setdefault(origin, {'source': origin, 'within': source, 'kinds': [], 'tags': []})
+            # Sources can nest, a path entry around a repo, and the outermost reaches every
+            # directory the restore might have to create.
+            if len(source) < len(row['within']):
+                row['within'] = source
+            # A repo's two groups share one subtree, and the file lists say which kind is here.
+            rel = snapshot_rel(origin)
+            listed = group.get('paths')
+            holds_it = listed is None or any(path == rel or path.startswith(rel + '/') for path in listed)
+            if holds_it and group['kind'] not in row['kinds']:
+                row['kinds'].append(group['kind'])
+            row['tags'] += [tag for tag in group.get('tags', []) if tag not in row['tags']]
+
+    for row in rows.values():
+        stored = [snapshot_dir / snapshot_rel(origin) for origin, is_dir in stored_paths(snapshot_dir, row['source']) if not is_dir]
+        row['files'] = len(stored)
+        row['bytes'] = sum(path.stat().st_size for path in stored)
+    return list(rows.values())
 
 
 def remap_home(source, manifest_home, target_home):
@@ -1292,6 +1588,16 @@ def remap_home(source, manifest_home, target_home):
     return source
 
 
+def normalized_needle(needle):
+    """A --source as typed, with its ~ expanded and any trailing slash or ./ dropped."""
+    return os.path.normpath(os.path.expanduser(needle))
+
+
+def source_names(source, manifest_home, target_home):
+    """A recorded source as the snapshot names it, then as this machine names it."""
+    return (os.path.normpath(source), os.path.normpath(remap_home(source, manifest_home, target_home)))
+
+
 def paths_under(source, candidates):
     """Absolute paths from candidates that are the source itself or live beneath it."""
     prefix = str(source).rstrip('/') + '/'
@@ -1303,11 +1609,36 @@ def paths_under_any(sources, candidates):
     return sorted({p for source in sources for p in paths_under(source, candidates)})
 
 
+def symlinked_ancestors(row, candidates):
+    """The directories above a path inside a source that were symlinks when backed up.
+
+    Only a row naming a path inside a source has any. A symlink at ~/.config/nvim is
+    dereferenced into the snapshot, so restoring ~/.config/nvim/init.lua writes through that
+    link where it still exists here, and into a fresh real directory where it does not.
+    """
+    within = row.get('within')
+    if within is None:
+        return []
+    links = set(candidates)
+    return sorted(str(parent) for parent in Path(row['source']).parents if parent.is_relative_to(within) and str(parent) in links)
+
+
+def selection_count(rows):
+    """How many whole sources and how many paths inside one a restore covers, in words."""
+    inside = [row for row in rows if row.get('within')]
+    whole = len(rows) - len(inside)
+    parts = [plural(whole, 'source')] if whole or not inside else []
+    if inside:
+        holders = 'a source' if len({row['within'] for row in inside}) == 1 else 'sources'
+        parts.append(f'{plural(len(inside), "path")} inside {holders}')
+    return ' and '.join(parts)
+
+
 class RestoreAborted(Exception):
     """Answering quit at an --on-conflict ask prompt, which stops the run where it stands."""
 
 
-def stored_paths(snapshot_dir, source):
+def stored_paths(snapshot_dir, source, unreadable=None):
     """Every path the snapshot holds for one source, as the absolute paths it had when backed up.
 
     Parents come before children, and the source itself is the first entry.
@@ -1316,13 +1647,19 @@ def stored_paths(snapshot_dir, source):
     The target's own tree can answer none of those: a repo whose untracked files are being
     restored has a whole working tree beside them that no snapshot ever recorded, and walking
     that is how a restore of two hundred files came to chmod eleven thousand paths.
+
+    Each directory the walk cannot list is appended to `unreadable` when a caller passes one.
     """
     stored = snapshot_dir / snapshot_rel(source)
     if stored.is_file():
         return [(Path(source), False)]
 
+    def note(error):
+        if unreadable is not None:
+            unreadable.append(error.filename)
+
     found = [(Path(source), True)]
-    for dirpath, dirnames, filenames in os.walk(stored):
+    for dirpath, dirnames, filenames in os.walk(stored, onerror=note):
         relative = os.path.relpath(dirpath, stored)
         base = Path(source) if relative == '.' else Path(source) / relative
         found.extend((base / name, True) for name in sorted(dirnames))
@@ -1330,7 +1667,7 @@ def stored_paths(snapshot_dir, source):
     return found
 
 
-def target_entries(snapshot_dir, source, target_root, manifest_home, target_home, skip):
+def target_entries(snapshot_dir, source, target_root, manifest_home, target_home, skip, within=None):
     """Each path the snapshot holds for a source: its name, where it lands, whether it is there.
 
     'name' is the path relative to the source, which is both what rsync reports a transfer under
@@ -1339,9 +1676,18 @@ def target_entries(snapshot_dir, source, target_root, manifest_home, target_home
     'existed' is read before rsync runs and is the only chance to read it: afterwards every path
     is present and nothing distinguishes the file that was overwritten from the one that was
     created.
+
+    `within` is the source that `source` sits inside, when a restore names a path in one. The
+    directories between the two that the target lacks are entries too, because restoring one
+    file into a fresh ~/.ssh is exactly when that directory's 0700 has to be put back.
     """
     from_a_file = (snapshot_dir / snapshot_rel(source)).is_file()
     entries = []
+    if within is not None:
+        for parent in Path(source).parents:
+            target = Path(target_root) / snapshot_rel(remap_home(str(parent), manifest_home, target_home))
+            if parent.is_relative_to(within) and not target.exists():
+                entries.append({'name': str(parent), 'origin': parent, 'is_dir': True, 'target': target, 'existed': False})
     for origin, is_dir in stored_paths(snapshot_dir, source):
         if str(origin) in skip:
             continue
@@ -1418,9 +1764,19 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
     if args.skip_symlinked and str(source) in symlinked:
         print(f'      {yellow("skip: was a symlink")}')
         return None
+    linked_above = symlinked_ancestors(row, ['/' + rel for rel in symlinks])
+    if args.skip_symlinked and linked_above:
+        print(f'      {yellow(f"skip: inside {tilde(linked_above[0])}, which was a symlink")}')
+        return None
 
     entries = target_entries(
-        snapshot_dir, source, target_root, manifest_home, target_home, set(symlinked) if args.skip_symlinked else set()
+        snapshot_dir,
+        source,
+        target_root,
+        manifest_home,
+        target_home,
+        set(symlinked) if args.skip_symlinked else set(),
+        within=row.get('within'),
     )
     conflicts = [entry for entry in entries if not entry['is_dir'] and entry['existed']]
 
@@ -1487,7 +1843,7 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
         # rsync has no question left to answer that this list does not.
         for name in sorted(by_name):
             report(name)
-        report_source_totals(transferred, files, declined)
+        report_source_totals(transferred, files, declined, args.dry_run)
         return entries
 
     try:
@@ -1496,7 +1852,7 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
         if listing:
             os.unlink(listing)
 
-    report_source_totals(transferred, files, declined)
+    report_source_totals(transferred, files, declined, args.dry_run)
     return entries
 
 
@@ -1507,7 +1863,7 @@ def write_path_list(names):
         return tmp.name
 
 
-def report_source_totals(transferred, files, declined):
+def report_source_totals(transferred, files, declined, dry_run):
     """What the source's rsync did, in the four outcomes a file can have.
 
     Unchanged is the one worth printing even when it is everything: a restore that names no
@@ -1515,11 +1871,12 @@ def report_source_totals(transferred, files, declined):
     """
     written = [entry for entry in transferred if entry is not None]
     created = sum(1 for entry in written if not entry['existed'])
+    restored, replaced = ('would be restored', 'would be replaced') if dry_run else ('restored', 'replaced')
     parts = []
     if created:
-        parts.append(green(plural(created, 'file') + ' restored'))
+        parts.append(green(f'{plural(created, "file")} {restored}'))
     if len(written) - created:
-        parts.append(yellow(f'{len(written) - created} replaced'))
+        parts.append(yellow(f'{len(written) - created} {replaced}'))
     if declined:
         parts.append(f'{len(declined)} kept')
     if len(files) - len(written):
@@ -1582,9 +1939,11 @@ def explain_empty_selection(manifest, date, args):
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
         print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags list")} compares the two', file=sys.stderr)
     if args.source:
-        print(f'  no source in {cyan(date)} contains {yellow(", ".join(args.source))}:', file=sys.stderr)
+        needles = yellow(', '.join(args.source))
+        home_then, home_now = manifest.get('home'), str(Path.home())
+        print(f'  no source in {cyan(date)} contains {needles}, and it holds nothing at that path inside one:', file=sys.stderr)
         for row in source_rows(groups):
-            print(f'    {tilde(row["source"])}', file=sys.stderr)
+            print(f'    {tilde(remap_home(row["source"], home_then, home_now))}', file=sys.stderr)
     if args.all and not groups:
         print(f'  {cyan(date)} records nothing at all', file=sys.stderr)
 
@@ -1647,6 +2006,10 @@ def do_restore(config, config_path, args):
         rows = pick_sources(snapshot_dir, manifest, config_path.stem)
     else:
         rows = source_rows(groups)
+        if not args.all:
+            whole = {row['source'] for row in rows}
+            inside = rows_inside_sources(snapshot_dir, manifest, args.source)
+            rows = sorted(rows + [row for row in inside if row['source'] not in whole], key=lambda row: row['source'])
 
     if not rows:
         # An explicit selection that matched nothing is a failed request, not a canceled one:
@@ -1664,7 +2027,7 @@ def do_restore(config, config_path, args):
     kinds = file_kinds(manifest)
 
     verb = yellow('would restore') if args.dry_run else green('restoring')
-    print(f'{bold("safekeep:")} {verb} {bold(plural(len(rows), "source"))} from {cyan(date)} to {cyan(args.to)}')
+    print(f'{bold("safekeep:")} {verb} {bold(selection_count(rows))} from {cyan(date)} to {cyan(args.to)}')
     # A date says when a snapshot was taken and nothing about why, which is the question being
     # answered when an older one is picked on purpose.
     if manifest.get('label'):
@@ -1680,7 +2043,10 @@ def do_restore(config, config_path, args):
     restored = []
     entries = []
     decision = {'all': None}
-    width = max(len(tilde(row['source'])) for row in rows)
+    # Where each source lands rather than where it was recorded, which is the form --source and
+    # `files list` both take.
+    landing = {row['source']: tilde(remap_home(row['source'], manifest_home, target_home)) for row in rows}
+    width = max(len(name) for name in landing.values())
     for position, row in enumerate(rows, start=1):
         # Printed before the work rather than after it: this line is what says which source the
         # wait belongs to, and after the fact it says nothing that was not already known. The
@@ -1688,14 +2054,14 @@ def do_restore(config, config_path, args):
         # restored, when what a snapshot holds is the files git could not put back.
         counter = cyan(f'[{position}/{len(rows)}]')
         sizes = size_cell(row['files'], row['bytes'])
-        print(f'  {counter} {tilde(row["source"]):<{width}}  {sizes}  {cyan(kinds_label(row["kinds"]))}', flush=True)
+        print(f'  {counter} {landing[row["source"]]:<{width}}  {sizes}  {cyan(kinds_label(row["kinds"]))}', flush=True)
         try:
             restored_entries = restore_source(snapshot_dir, row, args.to, manifest_home, target_home, symlinks, kinds, args, decision)
         except RestoreAborted:
             print(f'\n  {yellow("stopped here")} — the sources already restored are left as they are')
             break
         if restored_entries is not None:
-            restored.append(row['source'])
+            restored.append(row)
             entries.extend(restored_entries)
 
     if entries:
@@ -1704,17 +2070,36 @@ def do_restore(config, config_path, args):
         detail = f' ({plural(recorded, "recorded deviation")})' if recorded else ''
         print(f'\n  {verb} modes on {bold(plural(changed, "path"))}{detail}')
 
-    restored_symlinks = paths_under_any(restored, ['/' + rel for rel in symlinks])
+    symlink_paths = ['/' + rel for rel in symlinks]
+    restored_symlinks = paths_under_any([row['source'] for row in restored], symlink_paths)
     if restored_symlinks and not args.skip_symlinked:
-        print(f'\n{yellow("note:")} {len(restored_symlinks)} restored paths were symlinks when backed up, and are now real files:')
+        one = len(restored_symlinks) == 1
+        was = 'was a symlink' if one else 'were symlinks'
+        if args.dry_run:
+            now = 'would be a real file' if one else 'would be real files'
+        else:
+            now = 'is now a real file' if one else 'are now real files'
+        print(f'\n{yellow("note:")} {plural(len(restored_symlinks), "restored path")} {was} when backed up, and {now}:')
         for abs_path in restored_symlinks[:10]:
             print(f'  {abs_path} -> {symlinks[abs_path.lstrip("/")]}')
         if len(restored_symlinks) > 10:
             print(f'  ... and {len(restored_symlinks) - 10} more')
         print(f'  remove them and run {cyan("dotfiles link")} to restore the symlinks, or use {cyan("--skip-symlinked")} next time')
 
+    linked_above = sorted({link for row in restored for link in symlinked_ancestors(row, symlink_paths)})
+    if linked_above:
+        were = 'a directory above these paths was a symlink' if len(linked_above) == 1 else 'directories above these paths were symlinks'
+        wrote, became = ('would write', 'would become') if args.dry_run else ('wrote', 'is now')
+        print(f'\n{yellow("note:")} {were} when backed up:')
+        for abs_path in linked_above[:10]:
+            print(f'  {abs_path} -> {symlinks[abs_path.lstrip("/")]}')
+        if len(linked_above) > 10:
+            print(f'  ... and {len(linked_above) - 10} more')
+        print(f'  where that link still exists here, the restore {wrote} through it into what it points at')
+        print(f'  where it does not, it {became} a real directory — use {cyan("--skip-symlinked")} to leave these paths alone')
+
     verb = yellow('would restore') if args.dry_run else green('restored')
-    print(f'\n{bold("safekeep:")} {verb} {bold(plural(len(restored), "source"))} to {cyan(args.to)}')
+    print(f'\n{bold("safekeep:")} {verb} {bold(selection_count(restored))} to {cyan(args.to)}')
 
 
 def select_sources(entries, args):
@@ -2001,8 +2386,27 @@ def edit_config(config_path):
         print(f'  {yellow("config warning:")} {warning}')
 
 
-def show_config(config_path, config, warnings):
+def show_config(config_path, config, warnings, as_json=False):
     """Display the resolved config with readable formatting."""
+    if as_json:
+        repos, back_up_untracked, ignored_patterns = repo_entries(config)
+        print_json(
+            {
+                'path': str(config_path),
+                'back_up_to': config['back_up_to'],
+                'back_up_paths': [{'path': str(path), 'tags': tags} for path, tags in normalize_entries(config.get('back_up_paths', []))],
+                'git': {
+                    'repos': [{'path': str(path), 'tags': tags} for path, tags in repos],
+                    'back_up_untracked_files': back_up_untracked,
+                    'back_up_ignored_files_matching': ignored_patterns,
+                },
+                'skip_names_matching': config.get('skip_names_matching', DEFAULT_SKIP_NAMES),
+                'skip_files_over_mb': config.get('skip_files_over_mb'),
+                'warnings': warnings,
+            }
+        )
+        return
+
     print(f'{bold("safekeep:")} {cyan(str(config_path))}')
     print()
     print(f'  {bold("back up to:")} {cyan(config["back_up_to"])}')
@@ -2055,6 +2459,7 @@ def show_help():
     help_row('safekeep backup run', '[--label <note>]', 'Copy the configured paths into a new snapshot')
     help_row('safekeep snapshots list', '', 'List the snapshots at the destination')
     help_row('safekeep snapshots show', '<date>', 'What one snapshot holds')
+    help_row('safekeep files list', '[--missing]', 'Every file the snapshots hold, one line each')
     help_row('safekeep tags list', '', 'What each tag covers, and what it would restore')
     help_row('safekeep tags show', '<name>', 'The sources one tag covers')
     help_row('safekeep restore', '--to <path>', 'Restore sources from a snapshot')
@@ -2090,6 +2495,7 @@ def show_help():
     help_row('safekeep config init', '', 'Write ~/.config/safekeep/default.toml')
     help_row('safekeep backup run -n', '', 'See what a backup would copy')
     help_row('safekeep snapshots list', '', 'What is on the destination already')
+    help_row('safekeep files list --missing', '', 'What older snapshots hold that this machine lacks')
     help_row('safekeep tags show secrets', '', 'What that tag would bring back')
     help_row('safekeep restore --to / --tag secrets', '', 'Restore one tag for real')
 
@@ -2144,6 +2550,7 @@ def show_snapshots_help():
 
     help_section('Options')
     help_row('--source', '<path>', 'On show: the files that snapshot holds for one source')
+    help_row('--json', '', 'Output as JSON to stdout')
     help_row('-h, --help', '', 'Show this help')
     help_text(
         '  A snapshot with no manifest is listed and says so — safekeep cannot restore',
@@ -2158,6 +2565,41 @@ def show_snapshots_help():
     help_end()
 
 
+def show_files_help():
+    help_header('safekeep files', 'Every file the snapshots hold, one line each.')
+    help_usage('safekeep files list [OPTIONS]')
+
+    help_section('Commands')
+    help_row('safekeep files list', '', 'Every file across every snapshot, from the newest holding it')
+
+    help_section('Options')
+    help_row('--missing', '', 'Only the files that are not on this machine')
+    help_row('--from', '<date>', 'Read that one snapshot instead of all of them')
+    help_row('--json', '', 'Output as JSON to stdout')
+    help_row('-h, --help', '', 'Show this help')
+    help_text(
+        '  Each file is listed once, under the newest snapshot that holds it — the copy a',
+        '  restore would bring back — so a file six directories deep is still one line.',
+        '  A file an older machine had and this one lacks is only in the older snapshots,',
+        '  because each backup copies only what the machine running it has.',
+    )
+
+    help_section('Bringing one back')
+    help_text(
+        '  Name the snapshot it is listed under, and the file itself as the source:',
+        '      safekeep restore --to / --from <snapshot> --source ~/path/to/file',
+        '  It is backed up from then on only if a config entry covers its path. After the',
+        '  next backup run, its line here names the newest snapshot if one does.',
+    )
+
+    help_section('Examples')
+    help_row('safekeep files list --missing', '', 'What older snapshots hold that this machine lacks')
+    help_row('safekeep files list --from 2026-08-04', '', 'Everything one snapshot holds, flat')
+    help_row('safekeep files list --missing --json', '', "The same, with each stored copy's path")
+
+    help_end()
+
+
 def show_tags_help():
     help_header('safekeep tags', 'The tags a restore can select on, and what each would bring back.')
     help_usage('safekeep tags <verb>')
@@ -2168,6 +2610,7 @@ def show_tags_help():
 
     help_section('Options')
     help_row('--from', '<date>', 'Size against that snapshot instead of the newest')
+    help_row('--json', '', 'Output as JSON to stdout')
     help_row('-h, --help', '', 'Show this help')
     help_text(
         '  A tag lives in two places and reading either alone misleads: the config says',
@@ -2191,10 +2634,12 @@ def show_restore_help():
     help_section('Selection')
     help_text('  Required, and never inferred. Pass at least one:')
     help_row('--all', '', 'Every source in the snapshot')
-    help_row('--source', '<path>', 'Sources whose path contains PATH (repeatable)')
+    help_row('--source', '<path>', 'Sources whose path contains PATH, or one file or directory inside one')
     help_row('--tag', '<name>', 'Sources carrying NAME (repeatable)')
     help_text(
         "  A source is one config entry — a path, or one repo's untracked and ignored files.",
+        '  --source is repeatable, and a full path to something inside a source restores',
+        '  that alone — `safekeep files list` prints those paths, one line per file.',
         '  A tag selects on the snapshot, which carries the tags its config had that day.',
         '  `safekeep tags show <name>` is what says whether this one selects anything.',
     )
@@ -2203,7 +2648,7 @@ def show_restore_help():
     help_row('--to', '<path>', 'Restore target root (/ for a real restore)')
     help_row('--from', '<date>', 'Snapshot to restore from (default: pick, else newest)')
     help_row('--on-conflict', '<mode>', 'backup (default), skip, overwrite, newer, ask')
-    help_row('--skip-symlinked', '', 'Skip paths that were symlinks when backed up')
+    help_row('--skip-symlinked', '', 'Skip paths that were symlinks when backed up, or sat under one')
     help_row('-n, --dry-run', '', 'Show what would be restored, change nothing')
     help_row('-h, --help', '', 'Show this help')
     help_text(
@@ -2217,6 +2662,7 @@ def show_restore_help():
     help_row('safekeep restore --to /tmp/rehearsal --all', '', 'Rehearse first — always')
     help_row('safekeep restore --to / --tag secrets', '', 'Restore one tag for real')
     help_row('safekeep restore --to / --from 2026-07-01 --all', '', 'Restore an older snapshot')
+    help_row('safekeep restore --to / --from 2026-07-01 --source ~/.ssh/config', '', 'Bring back one file')
 
     help_end()
 
@@ -2230,6 +2676,10 @@ def show_config_help():
     help_row('safekeep config edit', '', 'Open the config in $VISUAL or $EDITOR, then check it')
     help_row('safekeep config init', '[name]', "Write a starter config (default: 'default')")
     help_row('safekeep config example', '', 'Print the annotated example without writing it')
+
+    help_section('Options')
+    help_row('--json', '', 'On show: output as JSON to stdout')
+    help_row('-h, --help', '', 'Show this help')
 
     help_section('Files')
     help_text(
@@ -2274,12 +2724,23 @@ def build_parser():
     snapshots_commands = snapshots.add_subparsers(dest='snapshots_command', metavar='COMMAND')
     snapshots_list = snapshots_commands.add_parser('list', add_help=False)
     snapshots_list.add_argument('-h', '--help', action='store_true', dest='show_help')
+    snapshots_list.add_argument('--json', action='store_true', dest='as_json')
     # This verb renders the fzf preview panes as well as answering a typed `snapshots show`.
     # It was two hidden preview-* commands, which is the same command with the name left off.
     snapshots_show = snapshots_commands.add_parser('show', add_help=False)
     snapshots_show.add_argument('-h', '--help', action='store_true', dest='show_help')
     snapshots_show.add_argument('date', nargs='?', metavar='DATE')
     snapshots_show.add_argument('--source', metavar='PATH')
+    snapshots_show.add_argument('--json', action='store_true', dest='as_json')
+
+    files = commands.add_parser('files', add_help=False)
+    files.add_argument('-h', '--help', action='store_true', dest='show_help')
+    files_commands = files.add_subparsers(dest='files_command', metavar='COMMAND')
+    files_list = files_commands.add_parser('list', add_help=False)
+    files_list.add_argument('-h', '--help', action='store_true', dest='show_help')
+    files_list.add_argument('--from', dest='from_date', metavar='DATE')
+    files_list.add_argument('--missing', action='store_true')
+    files_list.add_argument('--json', action='store_true', dest='as_json')
 
     tags = commands.add_parser('tags', add_help=False)
     tags.add_argument('-h', '--help', action='store_true', dest='show_help')
@@ -2287,10 +2748,12 @@ def build_parser():
     tags_list = tags_commands.add_parser('list', add_help=False)
     tags_list.add_argument('-h', '--help', action='store_true', dest='show_help')
     tags_list.add_argument('--from', dest='from_date', metavar='DATE')
+    tags_list.add_argument('--json', action='store_true', dest='as_json')
     tags_show = tags_commands.add_parser('show', add_help=False)
     tags_show.add_argument('-h', '--help', action='store_true', dest='show_help')
     tags_show.add_argument('name', nargs='?', metavar='NAME')
     tags_show.add_argument('--from', dest='from_date', metavar='DATE')
+    tags_show.add_argument('--json', action='store_true', dest='as_json')
 
     restore = commands.add_parser('restore', add_help=False)
     restore.add_argument('-h', '--help', action='store_true', dest='show_help')
@@ -2315,6 +2778,7 @@ def build_parser():
     config_commands = config.add_subparsers(dest='config_command', metavar='COMMAND')
     config_show = config_commands.add_parser('show', add_help=False)
     config_show.add_argument('-h', '--help', action='store_true', dest='show_help')
+    config_show.add_argument('--json', action='store_true', dest='as_json')
     config_init = config_commands.add_parser('init', add_help=False)
     config_init.add_argument('-h', '--help', action='store_true', dest='show_help')
     config_init.add_argument('name', nargs='?', default='default')
@@ -2333,6 +2797,7 @@ def build_parser():
 SCREENS = {
     'backup': show_backup_help,
     'snapshots': show_snapshots_help,
+    'files': show_files_help,
     'tags': show_tags_help,
     'restore': show_restore_help,
     'config': show_config_help,
@@ -2343,6 +2808,7 @@ SCREENS = {
 NAMESPACE_VERBS = {
     'backup': 'backup_command',
     'snapshots': 'snapshots_command',
+    'files': 'files_command',
     'tags': 'tags_command',
     'config': 'config_command',
 }
@@ -2460,15 +2926,17 @@ def main():
     config, warnings = load_config(config_path)
 
     if args.command == 'config':
-        show_config(config_path, config, warnings)
+        show_config(config_path, config, warnings, args.as_json)
     elif args.command == 'snapshots':
         dest = Path(config['back_up_to']).expanduser()
         if args.snapshots_command == 'list':
-            show_snapshot_list(dest)
+            show_snapshot_list(dest, args.as_json)
         elif args.source:
-            show_snapshot_source_files(dest, args.date, args.source)
+            show_snapshot_source_files(dest, args.date, args.source, args.as_json)
         else:
-            show_snapshot_record(dest, args.date)
+            show_snapshot_record(dest, args.date, args.as_json)
+    elif args.command == 'files':
+        show_files(config, args)
     elif args.command == 'tags':
         if args.tags_command == 'list':
             show_tag_list(config, config_path, args)
