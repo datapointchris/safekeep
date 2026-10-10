@@ -2,13 +2,13 @@
 
 Typer owns the parsing, the help screens, `no_args_is_help` at every namespace, and exit 2 for a
 usage error. Each command here is a thin wrapper: it resolves the config and hands the logic in
-`safekeep` the flags it was given, so that logic stays testable without a runner.
+`safekeep` the flags it was given, as typed parameters or a request dataclass, so a renamed flag
+fails the type check rather than a run.
 """
 
+import shlex
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Annotated
 
 import typer
@@ -18,12 +18,17 @@ from pyselfupdate.typercmd import run_update
 from typer.core import TyperGroup
 
 from safekeep import CONFIG_TEMPLATE
+from safekeep import REHEARSAL_ROOT
+from safekeep import BackupRequest
+from safekeep import ConflictPolicy
+from safekeep import RestoreRequest
 from safekeep import do_backup
 from safekeep import do_restore
 from safekeep import edit_config
 from safekeep import init_config
 from safekeep import load_config
 from safekeep import resolve_config
+from safekeep import resolve_tag_index
 from safekeep import show_config
 from safekeep import show_files
 from safekeep import show_snapshot_list
@@ -31,6 +36,7 @@ from safekeep import show_snapshot_record
 from safekeep import show_snapshot_source_files
 from safekeep import show_tag
 from safekeep import show_tag_list
+from safekeep import snapshot_choices
 from safekeep import tool_version
 
 # Notify-only: one check per 24h, one line to stderr, and `safekeep update` is the only thing that
@@ -112,9 +118,35 @@ def destination(config) -> Path:
     return Path(config['back_up_to']).expanduser()
 
 
-def flags(ctx: typer.Context, **given) -> SimpleNamespace:
-    """A command's flags in the shape the logic in `safekeep` reads them."""
-    return SimpleNamespace(no_input=invocation(ctx).no_input, **given)
+def rehearsal(
+    ctx: typer.Context,
+    from_date: str | None,
+    all_sources: bool,
+    sources: list[str],
+    tags: list[str],
+    on_conflict: ConflictPolicy,
+    skip_symlinked: bool,
+    dry_run: bool,
+) -> str:
+    """The restore as it was typed, aimed at a scratch directory, for an error that has to name one."""
+    root = invocation(ctx)
+    words = ['safekeep']
+    if root.config:
+        words += ['-c', root.config]
+    if root.no_input:
+        words.append('--no-input')
+    words += ['restore', '--to', REHEARSAL_ROOT]
+    if from_date:
+        words += ['--from', from_date]
+    selection = (['--all'] if all_sources else []) + [w for s in sources for w in ('--source', s)] + [w for t in tags for w in ('--tag', t)]
+    words += selection or ['--all']
+    if on_conflict != ConflictPolicy.BACKUP:
+        words += ['--on-conflict', on_conflict.value]
+    if skip_symlinked:
+        words.append('--skip-symlinked')
+    if dry_run:
+        words.append('-n')
+    return shlex.join(words)
 
 
 def version_callback(asked: bool) -> None:
@@ -207,9 +239,8 @@ def backup_run(
     label answers. A snapshot is one run, so a later backup cannot overwrite its label.
     """
     config_path, config, warnings = loaded(ctx)
-    # None rather than '' when --label is absent: the manifest writer records the key only when it was typed.
-    given = flags(ctx, tag=tag or [], source=(source or []) + (group or []), label=label, dry_run=dry_run)
-    do_backup(config, config_path, warnings, given)
+    request = BackupRequest(tag=tag or [], source=(source or []) + (group or []), label=label, dry_run=dry_run)
+    do_backup(config, config_path, warnings, request)
 
 
 # --- snapshots --------------------------------------------------------------------------------
@@ -227,36 +258,53 @@ snapshots_app = typer.Typer(
 app.add_typer(snapshots_app, name='snapshots', rich_help_panel='Read')
 
 
-@snapshots_app.command('list')
+@snapshots_app.command(
+    'list',
+    epilog=examples(
+        ('safekeep snapshots list', 'which backups exist, newest first'),
+        ('safekeep snapshots list --json', 'the same, for a script'),
+    ),
+)
 def snapshots_list(ctx: typer.Context, as_json: JsonOption = False) -> None:
     """Every snapshot at the destination, newest first.
 
-    A snapshot with no manifest is listed and says so. safekeep cannot restore it, and the reason
-    belongs on the row rather than in a later failure.
+    A snapshot missing its manifest, the record of what it holds and the modes to restore, is listed
+    and marked: safekeep cannot restore it.
     """
     _, config, _ = loaded(ctx)
     show_snapshot_list(destination(config), as_json)
 
 
-@snapshots_app.command('show')
+# A miss exits 0 without --json because this is also the restore picker's preview pane, which has
+# nowhere else to show one.
+@snapshots_app.command(
+    'show',
+    epilog=examples(
+        ('safekeep snapshots show 2026-08-13', "that day's last run, for a date from snapshots list"),
+        ('safekeep snapshots show 2026-08-13 --source ~/.ssh', 'the files it holds for one source'),
+    ),
+)
 def snapshots_show(
     ctx: typer.Context,
     date: Annotated[
-        str,
+        str | None,
         typer.Argument(
-            metavar='DATE', help='A snapshot as `safekeep snapshots list` names it, or a date for the last run that day', show_default=False
+            metavar='DATE',
+            help='Required. A snapshot as `safekeep snapshots list` names it, or a date for the last run that day',
+            show_default=False,
         ),
-    ],
+    ] = None,
     source: Annotated[str | None, typer.Option('--source', metavar='PATH', help='The files that snapshot holds for one source')] = None,
     as_json: JsonOption = False,
 ) -> None:
     """One snapshot: its sources, sizes and tags.
 
-    Without `--json` an absent snapshot or source prints the reason and succeeds, because this is
-    also the restore picker's preview pane. With `--json` it exits 1, so a caller can tell an answer
-    from a miss.
+    Without `--json` an absent snapshot or source prints the reason and exits 0. With `--json` it
+    exits 1, so a script can tell an answer from a miss.
     """
     _, config, _ = loaded(ctx)
+    if date is None:
+        ctx.fail(f"Missing DATE: which snapshot to show. A date picks that day's last run.\n{snapshot_choices(destination(config))}")
     if source:
         show_snapshot_source_files(destination(config), date, source, as_json)
     else:
@@ -304,7 +352,7 @@ def files_list(
     line here names the newest snapshot if one does.
     """
     _, config, _ = loaded(ctx)
-    show_files(config, flags(ctx, missing=missing, from_date=from_date, as_json=as_json))
+    show_files(config, missing=missing, from_date=from_date, as_json=as_json)
 
 
 # --- tags -------------------------------------------------------------------------------------
@@ -329,34 +377,43 @@ app.add_typer(tags_app, name='tags', rich_help_panel='Read')
 SizeFromOption = Annotated[str | None, typer.Option('--from', metavar='DATE', help='Size against that snapshot instead of the newest')]
 
 
-@tags_app.command('list')
+@tags_app.command(
+    'list',
+    epilog=examples(
+        ('safekeep tags list', 'every tag, sized against the newest snapshot'),
+        ('safekeep tags list --from 2026-07-01', 'sized against an older snapshot, for a date from snapshots list'),
+    ),
+)
 def tags_list(ctx: typer.Context, from_date: SizeFromOption = None, as_json: JsonOption = False) -> None:
     """Every tag, the sources it covers, and what it would restore."""
     config_path, config, _ = loaded(ctx)
-    show_tag_list(config, config_path, flags(ctx, from_date=from_date, as_json=as_json))
+    show_tag_list(config, config_path, from_date=from_date, as_json=as_json)
 
 
-@tags_app.command('show')
+@tags_app.command(
+    'show',
+    epilog=examples(
+        ('safekeep tags show secrets', 'what restore --tag secrets would bring back, for a tag from tags list'),
+    ),
+)
 def tags_show(
     ctx: typer.Context,
-    name: Annotated[str, typer.Argument(metavar='NAME', help='A tag as `safekeep tags list` names it', show_default=False)],
+    name: Annotated[
+        str | None, typer.Argument(metavar='NAME', help='Required. A tag as `safekeep tags list` names it', show_default=False)
+    ] = None,
     from_date: SizeFromOption = None,
     as_json: JsonOption = False,
 ) -> None:
     """One tag, source by source, and the restore that brings it back."""
     config_path, config, _ = loaded(ctx)
-    show_tag(config, config_path, flags(ctx, name=name, from_date=from_date, as_json=as_json))
+    if name is None:
+        index, _, _ = resolve_tag_index(config, from_date)
+        tags = ', '.join(sorted(index)) if index else 'none yet, so tag the sources with safekeep config edit'
+        ctx.fail(f'Missing NAME: which tag to show. Tags: {tags}')
+    show_tag(config, config_path, name=name, from_date=from_date, as_json=as_json)
 
 
 # --- restore ----------------------------------------------------------------------------------
-
-
-class OnConflict(StrEnum):
-    BACKUP = 'backup'
-    SKIP = 'skip'
-    OVERWRITE = 'overwrite'
-    NEWER = 'newer'
-    ASK = 'ask'
 
 
 @app.command(
@@ -373,14 +430,14 @@ class OnConflict(StrEnum):
 def restore(
     ctx: typer.Context,
     to: Annotated[
-        str,
+        str | None,
         typer.Option(
             '--to',
             metavar='PATH',
-            help='Root to restore into: `/` for a real restore, or a scratch directory such as `/tmp/restore-test` to rehearse',
+            help=f'Required. Root to restore into: `/` for a real restore, or a scratch directory such as `{REHEARSAL_ROOT}` to rehearse',
             show_default=False,
         ),
-    ],
+    ] = None,
     from_date: Annotated[
         str | None, typer.Option('--from', metavar='DATE', help='Snapshot to restore from (default: pick, else newest)')
     ] = None,
@@ -399,11 +456,9 @@ def restore(
         list[str] | None, typer.Option('--tag', metavar='NAME', help='Sources carrying NAME (repeatable)', rich_help_panel='Selection')
     ] = None,
     on_conflict: Annotated[
-        OnConflict,
-        typer.Option(
-            '--on-conflict', metavar='MODE', help='What to do with a file already at the target: backup, skip, overwrite, newer or ask'
-        ),
-    ] = OnConflict.BACKUP,
+        ConflictPolicy,
+        typer.Option('--on-conflict', metavar='POLICY', help=f'What to do with a file already at the target: {", ".join(ConflictPolicy)}'),
+    ] = ConflictPolicy.BACKUP,
     skip_symlinked: Annotated[
         bool, typer.Option('--skip-symlinked', help='Skip paths that were symlinks when backed up, or sat under one')
     ] = False,
@@ -421,19 +476,23 @@ def restore(
     file it replaced beside it as `<name>.pre-restore`. `ask` names each existing file and waits for a
     decision, `[y]es [N]o [a]ll [k]eep all [q]uit`, and keeps no copies, since you were asked.
     """
+    sources = (source or []) + (group or [])
+    if to is None:
+        rehearse = rehearsal(ctx, from_date, all_sources, sources, tag or [], on_conflict, skip_symlinked, dry_run)
+        ctx.fail(f'Missing --to: the root to restore into. --to / puts files back where they were.\nRehearse this one first: {rehearse}')
     config_path, config, _ = loaded(ctx)
-    given = flags(
-        ctx,
+    request = RestoreRequest(
         to=to,
         from_date=from_date,
         all=all_sources,
-        source=(source or []) + (group or []),
+        source=sources,
         tag=tag or [],
-        on_conflict=on_conflict.value,
+        on_conflict=on_conflict,
         skip_symlinked=skip_symlinked,
         dry_run=dry_run,
+        no_input=invocation(ctx).no_input,
     )
-    do_restore(config, config_path, given)
+    do_restore(config, config_path, request)
 
 
 # --- config -----------------------------------------------------------------------------------
@@ -455,14 +514,20 @@ config_app = typer.Typer(
 app.add_typer(config_app, name='config', rich_help_panel='Manage')
 
 
-@config_app.command('show')
+@config_app.command(
+    'show',
+    epilog=examples(
+        ('safekeep config show', 'the config in use, which file it is, and any warnings about it'),
+        ('safekeep -c work config show', 'another config, by name'),
+    ),
+)
 def config_show(ctx: typer.Context, as_json: JsonOption = False) -> None:
     """Display the resolved config and exit."""
     config_path, config, warnings = loaded(ctx)
     show_config(config_path, config, warnings, as_json)
 
 
-@config_app.command('edit')
+@config_app.command('edit', epilog=examples(('safekeep config edit', 'change the config, then see what the edit changed')))
 def config_edit(ctx: typer.Context) -> None:
     """Open the config in $VISUAL or $EDITOR, then check it."""
     # Resolved but not loaded: a config that fails to load is the main reason to open one, and
@@ -470,7 +535,13 @@ def config_edit(ctx: typer.Context) -> None:
     edit_config(resolve_config(invocation(ctx).config))
 
 
-@config_app.command('init')
+@config_app.command(
+    'init',
+    epilog=examples(
+        ('safekeep config init', 'a starter config named default'),
+        ('safekeep config init work', 'a second config; every command then names one with -c'),
+    ),
+)
 def config_init(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(metavar='NAME', help='Name of the config to write; `-c` overrides it')] = 'default',
@@ -479,7 +550,7 @@ def config_init(
     init_config(invocation(ctx).config or name)
 
 
-@config_app.command('example')
+@config_app.command('example', epilog=examples(('safekeep config example', 'every key, explained, without writing a file')))
 def config_example() -> None:
     """Print the annotated example without writing it."""
     print(CONFIG_TEMPLATE, end='')
@@ -488,7 +559,14 @@ def config_example() -> None:
 # --- update -----------------------------------------------------------------------------------
 
 
-@app.command('update', rich_help_panel='Manage')
+@app.command(
+    'update',
+    rich_help_panel='Manage',
+    epilog=examples(
+        ('safekeep update --check', 'whether a newer release exists, and what changed in it'),
+        ('safekeep update', 'install it'),
+    ),
+)
 def update(
     check_only: Annotated[bool, typer.Option('--check', help='Report whether an update is available without installing it')] = False,
     skip_changelog: Annotated[bool, typer.Option('--no-changelog', help='Do not list the commits between versions')] = False,

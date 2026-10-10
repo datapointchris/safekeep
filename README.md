@@ -37,8 +37,8 @@ safekeep config example          # print a starting config
 ```
 
 The verb comes last, and nothing acts until one selects it — a partial command prints the screen
-that completes it rather than guessing. `safekeep --help` is the one copy of the command surface, so
-it is not repeated here.
+that completes it rather than guessing. The help screens are the one copy of the command surface:
+`safekeep --help` for the tree, and each command's `-h` for its flags. So it is not repeated here.
 
 [`docs/reference.md`](docs/reference.md) is the full behavior: the manifest format, the restore
 conflict policies, the schema-change rules, and the reasoning behind each of them.
