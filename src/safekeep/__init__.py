@@ -1216,9 +1216,11 @@ def pick_sources(snapshot_dir, manifest, config_name):
             '--multi',
             '--delimiter=\t',
             '--with-nth=1',
-            # Named in full and pinned above the prompt: the multi-select keys are fzf's own, so
-            # the one place they can be recalled is the picker itself.
-            '--header=tab select · shift-tab deselect · enter restore · esc cancel',
+            # fzf binds ctrl-a to beginning-of-line and leaves select-all unbound.
+            '--bind=ctrl-a:select-all',
+            # Named in full and pinned above the prompt, since the picker is the one place the
+            # multi-select keys can be recalled at the moment they are needed.
+            '--header=tab select · shift-tab deselect · ctrl-a select all · enter restore · esc cancel',
             '--header-first',
             '--preview',
             preview_cmd,

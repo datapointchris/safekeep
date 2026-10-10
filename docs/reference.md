@@ -284,7 +284,7 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
 
 **The source picker is sorted by path**, not in manifest order. Manifest order is config order, which is meaningful to whoever wrote the config and to nobody scanning thirty rows for the one they came for.
 
-Both pickers pin their keys above the prompt — `tab` selects, `shift-tab` deselects, `ctrl-a` takes everything, `enter` restores. Multi-select is fzf's own binding rather than this tool's, so the picker is the only place it can be recalled at the moment it is needed.
+Both pickers pin their keys above the prompt, because the picker is the only place they can be recalled at the moment they are needed. The source picker's are `tab` to select, `shift-tab` to deselect, `ctrl-a` to select every row the query matches, and `enter` to restore. The first two are fzf's own. `ctrl-a` is bound here, since fzf leaves select-all unbound and gives `ctrl-a` to beginning-of-line.
 
 **A selection that matched nothing exits 1 and says why.** Canceling out of the fzf picker is a restore you decided against, and exits 0; `--tag wsl` matching nothing in the snapshot is a request that failed, and a caller has to be able to tell the two apart. The error names the tags that snapshot does carry, which is the fact that distinguishes a typo from a tag added to the config after the snapshot was taken.
 
