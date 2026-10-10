@@ -2099,13 +2099,53 @@ def apply_modes(manifest, entries, dry_run):
     return changed, recorded
 
 
-def explain_empty_selection(manifest, date, request: RestoreRequest, config_path):
-    """Say why an explicit selection matched nothing in this snapshot.
+def restore_command(request: RestoreRequest, config_path, from_snapshot=None):
+    """The restore `request` describes, as a command line that runs as printed."""
+    head = safekeep_for(config_path) + (' --no-input' if request.no_input else '') + ' restore'
+    snapshot = from_snapshot or request.from_date
+    tail = ['--from', snapshot] if snapshot else []
+    selection = (
+        (['--all'] if request.all else [])
+        + [w for s in request.source for w in ('--source', s)]
+        + [w for t in request.tag for w in ('--tag', t)]
+    )
+    tail += selection or ['--all']
+    if request.on_conflict != ConflictPolicy.BACKUP:
+        tail += ['--on-conflict', request.on_conflict.value]
+    if request.skip_symlinked:
+        tail.append('--skip-symlinked')
+    if request.dry_run:
+        tail.append('-n')
+    # Joined apart from the rest because shlex.join would quote the tilde, and a quoted one never expands.
+    return f'{head} --to {shell_path(request.to)} {shlex.join(tail)}'
+
+
+def selected_rows(snapshot_dir, manifest, request: RestoreRequest):
+    """The sources an explicit selection takes from one snapshot, and the paths it names inside them."""
+    rows = source_rows(select_groups(manifest, request) or [])
+    if request.all:
+        return rows
+    whole = {row['source'] for row in rows}
+    inside = rows_inside_sources(snapshot_dir, manifest, request.source)
+    return sorted(rows + [row for row in inside if row['source'] not in whole], key=lambda row: row['source'])
+
+
+def newest_snapshot_selecting(dest, request: RestoreRequest, besides):
+    """The newest snapshot other than `besides` that the selection restores anything from."""
+    for snapshot_dir, manifest in list_snapshots(dest):
+        if manifest is not None and snapshot_dir.name != besides and selected_rows(snapshot_dir, manifest, request):
+            return snapshot_dir.name
+    return None
+
+
+def explain_empty_selection(dest, manifest, date, request: RestoreRequest, config_path):
+    """Say why an explicit selection matched nothing in this snapshot, and which snapshot it would match.
 
     Tags live in the manifest, not in the config -- each one is a copy of what the config said
     on the day the snapshot was taken. Tagging an entry today does not retag the snapshots that
     already exist, and that is the whole of why a restore comes back empty while the config
-    plainly carries the tag.
+    plainly carries the tag. A run narrowed by --tag or --source leaves the newest snapshot
+    holding only part of what the one before it holds, which is the other way to arrive here.
     """
     groups = manifest.get('groups', [])
     if request.tag:
@@ -2113,7 +2153,7 @@ def explain_empty_selection(manifest, date, request: RestoreRequest, config_path
         compare = f'{safekeep_for(config_path)} tags list --from {date}'
         print(f'  no source in {cyan(date)} carries {yellow(", ".join(request.tag))}', file=sys.stderr)
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
-        print(f'  a snapshot carries the tags its config had that day. {cyan(compare)} compares the two', file=sys.stderr)
+        print(f'  a snapshot carries the tags its config had that day, compared with the config by: {cyan(compare)}', file=sys.stderr)
     if request.source:
         needles = yellow(', '.join(request.source))
         home_then, home_now = manifest.get('home'), str(Path.home())
@@ -2122,6 +2162,12 @@ def explain_empty_selection(manifest, date, request: RestoreRequest, config_path
             print(f'    {tilde(remap_home(row["source"], home_then, home_now))}', file=sys.stderr)
     if request.all and not groups:
         print(f'  {cyan(date)} records nothing at all', file=sys.stderr)
+    other = newest_snapshot_selecting(dest, request, besides=date)
+    if other is not None:
+        print(
+            f'  restore it from the newest snapshot that holds it: {cyan(restore_command(request, config_path, from_snapshot=other))}',
+            file=sys.stderr,
+        )
 
 
 def can_prompt(no_input: bool):
@@ -2184,18 +2230,14 @@ def do_restore(config, config_path, request: RestoreRequest):
         require_fzf()
         rows = pick_sources(snapshot_dir, manifest, config_path)
     else:
-        rows = source_rows(groups)
-        if not request.all:
-            whole = {row['source'] for row in rows}
-            inside = rows_inside_sources(snapshot_dir, manifest, request.source)
-            rows = sorted(rows + [row for row in inside if row['source'] not in whole], key=lambda row: row['source'])
+        rows = selected_rows(snapshot_dir, manifest, request)
 
     if not rows:
         # An explicit selection that matched nothing is a failed request, not a canceled one:
         # exit non-zero so a caller cannot read it as a restore that happened to be empty.
         if request.all or request.source or request.tag:
             print(f'{red("safekeep:")} nothing selected, nothing restored', file=sys.stderr)
-            explain_empty_selection(manifest, date, request, config_path)
+            explain_empty_selection(dest, manifest, date, request, config_path)
             sys.exit(1)
         print(f'{yellow("safekeep:")} nothing selected, nothing restored')
         return

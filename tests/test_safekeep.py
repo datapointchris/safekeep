@@ -1999,6 +1999,37 @@ def test_restore_by_unknown_tag_says_which_tags_the_snapshot_has(tmp_path, sourc
     assert 'nothing selected' in restore.stderr
     assert 'tags in this snapshot: docs' in plain(restore.stderr)
     assert not target.exists()
+    compare = run_safekeep(*printed_after('compared with the config by:', restore.stderr))
+    assert compare.returncode == 0, compare.stderr
+
+
+@pytest.mark.parametrize('selection', ['tag', 'source'])
+def test_a_selection_a_narrowed_run_left_out_prints_the_restore_from_the_snapshot_holding_it(tmp_path, source_tree, selection):
+    """A run narrowed by --tag leaves the newest snapshot without the other sources. The miss names
+    the older snapshot that holds them, in a restore that runs as printed."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(
+        tmp_path,
+        dest,
+        back_up_paths=[
+            {'path': str(source_tree / 'notes'), 'tags': ['notes']},
+            {'path': str(source_tree / 'solo.conf'), 'tags': ['secrets']},
+        ],
+    )
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    full = age_todays_snapshot(dest).name
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'secrets')
+
+    target = tmp_path / 'target'
+    chosen = ['--tag', 'notes'] if selection == 'tag' else ['--source', str(source_tree / 'notes')]
+    missed = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), *chosen)
+    assert missed.returncode == 1
+    retry = printed_after('restore it from the newest snapshot that holds it:', missed.stderr)
+    assert retry[retry.index('--from') + 1] == full
+
+    restored = run_safekeep(*retry)
+    assert restored.returncode == 0, restored.stderr
+    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').read_text() == 'plain\n'
 
 
 def test_restore_dry_run_writes_nothing(tmp_path, source_tree):

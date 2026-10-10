@@ -31,6 +31,7 @@ from safekeep import init_config
 from safekeep import load_config
 from safekeep import resolve_config
 from safekeep import resolve_tag_index
+from safekeep import restore_command
 from safekeep import safekeep_for
 from safekeep import shell_path
 from safekeep import show_config
@@ -151,37 +152,6 @@ def loaded(ctx: typer.Context):
 
 def destination(config) -> Path:
     return Path(config['back_up_to']).expanduser()
-
-
-def rehearsal(
-    ctx: typer.Context,
-    from_date: str | None,
-    all_sources: bool,
-    sources: list[str],
-    tags: list[str],
-    on_conflict: ConflictPolicy,
-    skip_symlinked: bool,
-    dry_run: bool,
-) -> str:
-    """The restore as it was typed, aimed at a scratch directory, for an error that has to name one."""
-    root = invocation(ctx)
-    head = ['safekeep']
-    if root.config:
-        head += ['-c', root.config]
-    if root.no_input:
-        head.append('--no-input')
-    head.append('restore')
-    tail = ['--from', from_date] if from_date else []
-    selection = (['--all'] if all_sources else []) + [w for s in sources for w in ('--source', s)] + [w for t in tags for w in ('--tag', t)]
-    tail += selection or ['--all']
-    if on_conflict != ConflictPolicy.BACKUP:
-        tail += ['--on-conflict', on_conflict.value]
-    if skip_symlinked:
-        tail.append('--skip-symlinked')
-    if dry_run:
-        tail.append('-n')
-    # Joined apart from the rest because shlex.join would quote the tilde, and a quoted one never expands.
-    return f'{shlex.join(head)} --to {REHEARSE_INTO} {shlex.join(tail)}'
 
 
 def version_callback(asked: bool) -> None:
@@ -565,12 +535,10 @@ def restore(
     sources = (source or []) + (group or [])
     # Resolved before the --to check: with several configs and no -c, a rehearsal printed first would fail as printed.
     config_path, config, _ = loaded(ctx)
-    if to is None:
-        rehearse = rehearsal(ctx, from_date, all_sources, sources, tag or [], on_conflict, skip_symlinked, dry_run)
-        ctx.fail(f'Missing --to: the root to restore into. --to / puts files back where they were.\nRehearse this one first: {rehearse}')
     request = RestoreRequest(
-        # Expanded here because no shell expands a quoted ~, or one after --to= in zsh.
-        to=str(Path(to).expanduser()),
+        # Expanded here because no shell expands a quoted ~, or one after --to= in zsh. Without
+        # --to, the request is the rehearsal the error below offers.
+        to=str(Path(to).expanduser()) if to is not None else str(REHEARSAL_ROOT),
         from_date=from_date,
         all=all_sources,
         source=sources,
@@ -580,6 +548,9 @@ def restore(
         dry_run=dry_run,
         no_input=invocation(ctx).no_input,
     )
+    if to is None:
+        rehearse = restore_command(request, config_path)
+        ctx.fail(f'Missing --to: the root to restore into. --to / puts files back where they were.\nRehearse this one first: {rehearse}')
     do_restore(config, config_path, request)
 
 
