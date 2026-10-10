@@ -399,7 +399,10 @@ def restore(
         list[str] | None, typer.Option('--tag', metavar='NAME', help='Sources carrying NAME (repeatable)', rich_help_panel='Selection')
     ] = None,
     on_conflict: Annotated[
-        OnConflict, typer.Option('--on-conflict', help='What to do with a file already at the target')
+        OnConflict,
+        typer.Option(
+            '--on-conflict', metavar='MODE', help='What to do with a file already at the target: backup, skip, overwrite, newer or ask'
+        ),
     ] = OnConflict.BACKUP,
     skip_symlinked: Annotated[
         bool, typer.Option('--skip-symlinked', help='Skip paths that were symlinks when backed up, or sat under one')
