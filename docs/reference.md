@@ -23,6 +23,7 @@ safekeep backup run --tag wip   # Copy only the entries tagged 'wip'
 
 safekeep snapshots list                   # What is at the destination
 safekeep snapshots show 2026-08-13        # What one snapshot holds
+safekeep files list --missing             # What older snapshots hold that this machine lacks
 safekeep tags list                        # Which tags exist, and what each would restore
 safekeep tags show wip                    # The sources one tag covers
 safekeep restore --to /tmp/restore-test   # Rehearse: pick a snapshot and sources
@@ -269,6 +270,49 @@ That disagreement is the whole reason the command exists. Without it, `restore -
 
 Sizes come from the snapshot being reported against — the newest restorable one unless `--from` names another — so a tag's row is what a restore would actually bring back rather than what the source paths hold now. Sources carrying no tag at all are counted at the bottom: those are reachable only with `--all` or `--source`, which is worth knowing before a rebuild rather than during one.
 
+## Files
+
+```bash
+safekeep files list                    # every file across every snapshot, one line each
+safekeep files list --missing          # only the files this machine does not have
+safekeep files list --from 2026-08-04  # one snapshot instead of all of them
+safekeep files list --missing --json   # the same rows, with each stored copy's path
+```
+
+**Each file is listed once, under the newest snapshot holding it.** That copy is the one a restore
+brings back, and the snapshot it sits under is what `--from` names. A file six directories deep is
+one line. In a per-snapshot tree it is a walk through every directory above it.
+
+**`--missing` is how the files a machine move left behind are found.** Each backup copies only what
+the machine running it has. A file an older machine held and the new one never got back is in the
+older snapshots and in none taken since. No other view reads across snapshots, so this is the one
+place it shows up.
+
+**"On this machine" is read against this machine's home.** A snapshot taken under another username
+records its paths under that home, and they are remapped the way a restore remaps them. A file
+recorded at `/home/olduser/.config/app/settings.toml` is looked for at `~/.config/app/settings.toml`.
+
+**Path sources record no file list, so the listing walks every snapshot's tree.** Over a network
+drive that is one stat per file per snapshot. It only reads, and it prints a counter while it walks.
+
+`--json` carries each file's `stored` path, its location inside the snapshot, so a file can be read
+before deciding whether it comes back.
+
+### Bringing back what an older machine had
+
+```bash
+safekeep files list --missing
+less <back_up_to>/<snapshot>/home/you/path/to/file     # read it before deciding
+safekeep restore --to / --from <snapshot> --source ~/path/to/file
+safekeep backup run
+safekeep files list
+```
+
+A restore takes one path at a time, from the snapshot the listing put it under, and a directory
+restores in one. A restored file is backed up from then on only if a config entry covers its path.
+The last command checks that: the file sits under the newest snapshot if an entry covers it, and
+under the old one if none does.
+
 ## Restore
 
 ```bash
@@ -279,6 +323,12 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
 `--to` is required. `--to /` is a real restore; `--to /tmp/restore-test` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed.
 
 **A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
+
+**`--source` also takes a full path to a file or directory inside a source, and restores that path
+alone.** That is the form `safekeep files list` prints. The path is matched as this machine names
+it, so a snapshot taken under another home still finds it. Restoring one file can mean creating the
+directories between it and its source, and those get the modes the snapshot recorded: `~/.ssh/config`
+into a machine with no `~/.ssh` brings the directory back at `0700`.
 
 **Selection is always explicit.** With `--all`, `--source`, or `--tag`, restore runs non-interactively. With none of them on a terminal, fzf opens: first a snapshot picker previewing each manifest, then a multi-select source picker previewing the files that source holds, labeled untracked or ignored. With none of them and no terminal, it exits non-zero listing the available sources rather than guessing.
 

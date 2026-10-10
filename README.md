@@ -30,6 +30,7 @@ safekeep backup run              # copy the configured paths into a new snapshot
 safekeep backup run --tag work   # only the entries carrying that tag
 safekeep backup run --label 'before the wsl move'   # say why this one was taken
 safekeep snapshots list          # list what is at the destination
+safekeep files list --missing    # what older snapshots hold that this machine lacks
 safekeep tags list               # what each tag covers, and what it would restore
 safekeep restore --to ./here     # restore sources from a snapshot
 safekeep config example          # print a starting config

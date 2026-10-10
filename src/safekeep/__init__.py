@@ -1126,6 +1126,121 @@ def show_tag(config, config_path, args):
     print(f'\n  restore it: {cyan(f"safekeep restore --to /tmp/rehearsal{from_flag} --tag {name}")}')
 
 
+def restorable_snapshots(dest, date):
+    """Every snapshot with a manifest, newest first, or only the one `date` names."""
+    if date is None:
+        return [(d, m) for d, m in list_snapshots(dest) if m is not None]
+    return [snapshot_to_size_against(dest, date)]
+
+
+def snapshot_files(snapshot_dir, manifest):
+    """(path on this machine, stored copy) for every file one snapshot holds.
+
+    Path sources record no file list in the manifest, so the snapshot's own tree is walked. The
+    path is remapped through this machine's home, which is what lets a file from a WSL image with
+    another username be recognized as the one this machine lacks.
+    """
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    for row in source_rows(manifest.get('groups', [])):
+        for origin, is_dir in stored_paths(snapshot_dir, row['source']):
+            if not is_dir:
+                yield remap_home(str(origin), home_then, home_now), snapshot_dir / snapshot_rel(origin)
+
+
+def newest_copies(snapshots, progress):
+    """{path on this machine: row} for every file the snapshots hold, from the newest holding it.
+
+    The snapshots arrive newest first, so the first one a path turns up in holds the copy a
+    restore would bring back. Every later sighting is an older copy of the same file.
+    """
+    copies = {}
+    read = 0
+    for position, (snapshot_dir, manifest) in enumerate(snapshots, start=1):
+        for path, stored in snapshot_files(snapshot_dir, manifest):
+            read += 1
+            if progress and read % 200 == 0:
+                status(f'reading snapshot {position} of {len(snapshots)} … {plural(read, "file")}')
+            if path in copies:
+                continue
+            try:
+                size = stored.stat().st_size
+            except OSError:
+                continue
+            copies[path] = {
+                'path': path,
+                'here': os.path.lexists(path),
+                'snapshot': snapshot_dir.name,
+                'label': manifest.get('label'),
+                'host': manifest.get('hostname'),
+                'bytes': size,
+                'stored': str(stored),
+            }
+    if progress:
+        clear_status()
+    return copies
+
+
+def shell_path(path):
+    """A path as it can be pasted into a command: abbreviated, unless that would need quoting.
+
+    Quoting a tilde stops the shell expanding it, so a path that needs quotes is printed whole.
+    shlex counts the tilde itself as unsafe, which is why only what follows it is checked.
+    """
+    short = tilde(path)
+    if short != path and shlex.quote(short[1:]) == short[1:]:
+        return short
+    return shlex.quote(path)
+
+
+def show_files(config, args):
+    """Every file the snapshots hold, one line each, grouped under the newest snapshot holding it."""
+    dest = Path(config['back_up_to']).expanduser()
+    snapshots = restorable_snapshots(dest, args.from_date)
+    rows = sorted(newest_copies(snapshots, progress=not args.as_json).values(), key=lambda row: row['path'])
+    absent = [row for row in rows if not row['here']]
+    if args.missing:
+        rows = absent
+
+    if args.as_json:
+        print(json.dumps(rows, indent=2))
+        return
+
+    if not snapshots:
+        print(f'{yellow("safekeep:")} no restorable snapshots at {cyan(str(dest))}')
+        return
+
+    read_from = f'snapshot {cyan(snapshots[0][0].name)}' if args.from_date else f'{plural(len(snapshots), "snapshot")}'
+    if args.missing and not rows:
+        print(f'{bold("safekeep:")} every file in {read_from} is on this machine')
+        return
+    if args.missing:
+        verb = 'is' if len(rows) == 1 else 'are'
+        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from} {verb} not on this machine')
+    else:
+        shortfall = f', {yellow(f"{len(absent)} not on this machine")}' if absent else ', every one on this machine'
+        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from}{shortfall}')
+    print(f'  at {cyan(str(dest))}, each from the newest snapshot holding it')
+
+    # Grouped under the snapshot rather than repeating it on every row: the snapshot is what a
+    # restore names with --from, and its label is what says which machine the files came off.
+    for snapshot_dir, manifest in snapshots:
+        held = [row for row in rows if row['snapshot'] == snapshot_dir.name]
+        if not held:
+            continue
+        heading = f'{snapshot_dir.name}  {manifest.get("hostname", "?")}'
+        label = f'  {green(clip_to_terminal(manifest["label"], len(heading) + 4))}' if manifest.get('label') else ''
+        print(f'\n  {bold(snapshot_dir.name)}  {cyan(manifest.get("hostname", "?"))}{label}')
+        for row in held:
+            note = '' if row['here'] or args.missing else f'  {yellow("not on this machine")}'
+            print(f'    {human_size(row["bytes"]):>9}  {tilde(row["path"])}{note}')
+
+    if absent:
+        first = absent[0]
+        restore = f'safekeep restore --to / --from {first["snapshot"]} --source {shell_path(first["path"])}'
+        print(f'\n  restore one: {cyan(restore)}')
+
+
 def require_fzf():
     if shutil.which('fzf'):
         return
@@ -1264,7 +1379,11 @@ def show_snapshot_source_files(dest, date, source):
 
 
 def select_groups(manifest, args):
-    """Resolve which groups to restore from flags, or None if selection is interactive."""
+    """Resolve which groups to restore from flags, or None if selection is interactive.
+
+    A --source is matched against each source both as recorded and as this machine names it, so
+    a path copied out of `files list` still matches a snapshot taken under another home.
+    """
     groups = manifest.get('groups', [])
     if args.all:
         return groups
@@ -1272,13 +1391,59 @@ def select_groups(manifest, args):
     if not args.source and not args.tag:
         return None
 
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    needles = [os.path.expanduser(needle) for needle in args.source]
     selected = []
     for group in groups:
-        matched_source = any(needle in group['source'] for needle in args.source)
+        names = (group['source'], remap_home(group['source'], home_then, home_now))
+        matched_source = any(needle in name for needle in needles for name in names)
         matched_tag = any(tag in group.get('tags', []) for tag in args.tag)
         if matched_source or matched_tag:
             selected.append(group)
     return selected
+
+
+def rows_inside_sources(snapshot_dir, manifest, needles):
+    """A row for each --source naming a file or directory inside a source, covering only that path.
+
+    The needle is a path as this machine names it, which is how `files list` prints one, so it is
+    mapped back into the snapshot's home before it is looked up. 'within' is the source it sits
+    in: the restore creates the directories between the two, and gives them the modes it recorded.
+    """
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    rows = {}
+    for needle in needles:
+        wanted = os.path.normpath(os.path.expanduser(needle))
+        if not os.path.isabs(wanted):
+            continue
+        for group in manifest.get('groups', []):
+            source = group['source']
+            source_here = remap_home(source, home_then, home_now)
+            if not wanted.startswith(source_here.rstrip('/') + '/'):
+                continue
+            origin = source + wanted[len(source_here) :]
+            if not (snapshot_dir / snapshot_rel(origin)).exists():
+                continue
+            row = rows.setdefault(origin, {'source': origin, 'within': source, 'kinds': [], 'tags': []})
+            # Sources can nest, a path entry around a repo, and the outermost reaches every
+            # directory the restore might have to create.
+            if len(source) < len(row['within']):
+                row['within'] = source
+            # A repo's two groups share one subtree, and the file lists say which kind is here.
+            rel = snapshot_rel(origin)
+            listed = group.get('paths')
+            holds_it = listed is None or any(path == rel or path.startswith(rel + '/') for path in listed)
+            if holds_it and group['kind'] not in row['kinds']:
+                row['kinds'].append(group['kind'])
+            row['tags'] += [tag for tag in group.get('tags', []) if tag not in row['tags']]
+
+    for row in rows.values():
+        stored = [snapshot_dir / snapshot_rel(origin) for origin, is_dir in stored_paths(snapshot_dir, row['source']) if not is_dir]
+        row['files'] = len(stored)
+        row['bytes'] = sum(path.stat().st_size for path in stored)
+    return list(rows.values())
 
 
 def remap_home(source, manifest_home, target_home):
@@ -1330,7 +1495,7 @@ def stored_paths(snapshot_dir, source):
     return found
 
 
-def target_entries(snapshot_dir, source, target_root, manifest_home, target_home, skip):
+def target_entries(snapshot_dir, source, target_root, manifest_home, target_home, skip, within=None):
     """Each path the snapshot holds for a source: its name, where it lands, whether it is there.
 
     'name' is the path relative to the source, which is both what rsync reports a transfer under
@@ -1339,9 +1504,18 @@ def target_entries(snapshot_dir, source, target_root, manifest_home, target_home
     'existed' is read before rsync runs and is the only chance to read it: afterwards every path
     is present and nothing distinguishes the file that was overwritten from the one that was
     created.
+
+    `within` is the source that `source` sits inside, when a restore names a path in one. The
+    directories between the two that the target lacks are entries too, because restoring one
+    file into a fresh ~/.ssh is exactly when that directory's 0700 has to be put back.
     """
     from_a_file = (snapshot_dir / snapshot_rel(source)).is_file()
     entries = []
+    if within is not None:
+        for parent in Path(source).parents:
+            target = Path(target_root) / snapshot_rel(remap_home(str(parent), manifest_home, target_home))
+            if parent.is_relative_to(within) and not target.exists():
+                entries.append({'name': str(parent), 'origin': parent, 'is_dir': True, 'target': target, 'existed': False})
     for origin, is_dir in stored_paths(snapshot_dir, source):
         if str(origin) in skip:
             continue
@@ -1420,7 +1594,13 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
         return None
 
     entries = target_entries(
-        snapshot_dir, source, target_root, manifest_home, target_home, set(symlinked) if args.skip_symlinked else set()
+        snapshot_dir,
+        source,
+        target_root,
+        manifest_home,
+        target_home,
+        set(symlinked) if args.skip_symlinked else set(),
+        within=row.get('within'),
     )
     conflicts = [entry for entry in entries if not entry['is_dir'] and entry['existed']]
 
@@ -1582,7 +1762,8 @@ def explain_empty_selection(manifest, date, args):
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
         print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags list")} compares the two', file=sys.stderr)
     if args.source:
-        print(f'  no source in {cyan(date)} contains {yellow(", ".join(args.source))}:', file=sys.stderr)
+        needles = yellow(', '.join(args.source))
+        print(f'  no source in {cyan(date)} contains {needles}, and it holds nothing at that path inside one:', file=sys.stderr)
         for row in source_rows(groups):
             print(f'    {tilde(row["source"])}', file=sys.stderr)
     if args.all and not groups:
@@ -1647,6 +1828,10 @@ def do_restore(config, config_path, args):
         rows = pick_sources(snapshot_dir, manifest, config_path.stem)
     else:
         rows = source_rows(groups)
+        if not args.all:
+            whole = {row['source'] for row in rows}
+            inside = rows_inside_sources(snapshot_dir, manifest, args.source)
+            rows = sorted(rows + [row for row in inside if row['source'] not in whole], key=lambda row: row['source'])
 
     if not rows:
         # An explicit selection that matched nothing is a failed request, not a canceled one:
@@ -2055,6 +2240,7 @@ def show_help():
     help_row('safekeep backup run', '[--label <note>]', 'Copy the configured paths into a new snapshot')
     help_row('safekeep snapshots list', '', 'List the snapshots at the destination')
     help_row('safekeep snapshots show', '<date>', 'What one snapshot holds')
+    help_row('safekeep files list', '[--missing]', 'Every file the snapshots hold, one line each')
     help_row('safekeep tags list', '', 'What each tag covers, and what it would restore')
     help_row('safekeep tags show', '<name>', 'The sources one tag covers')
     help_row('safekeep restore', '--to <path>', 'Restore sources from a snapshot')
@@ -2090,6 +2276,7 @@ def show_help():
     help_row('safekeep config init', '', 'Write ~/.config/safekeep/default.toml')
     help_row('safekeep backup run -n', '', 'See what a backup would copy')
     help_row('safekeep snapshots list', '', 'What is on the destination already')
+    help_row('safekeep files list --missing', '', 'What older snapshots hold that this machine lacks')
     help_row('safekeep tags show secrets', '', 'What that tag would bring back')
     help_row('safekeep restore --to / --tag secrets', '', 'Restore one tag for real')
 
@@ -2158,6 +2345,41 @@ def show_snapshots_help():
     help_end()
 
 
+def show_files_help():
+    help_header('safekeep files', 'Every file the snapshots hold, one line each.')
+    help_usage('safekeep files list [OPTIONS]')
+
+    help_section('Commands')
+    help_row('safekeep files list', '', 'Every file across every snapshot, from the newest holding it')
+
+    help_section('Options')
+    help_row('--missing', '', 'Only the files that are not on this machine')
+    help_row('--from', '<date>', 'Read that one snapshot instead of all of them')
+    help_row('--json', '', 'Output as JSON to stdout')
+    help_row('-h, --help', '', 'Show this help')
+    help_text(
+        '  Each file is listed once, under the newest snapshot that holds it — the copy a',
+        '  restore would bring back — so a file six directories deep is still one line.',
+        '  A file an older machine had and this one lacks is only in the older snapshots,',
+        '  because each backup copies only what the machine running it has.',
+    )
+
+    help_section('Bringing one back')
+    help_text(
+        '  Name the snapshot it is listed under, and the file itself as the source:',
+        '      safekeep restore --to / --from <snapshot> --source ~/path/to/file',
+        '  It is backed up from then on only if a config entry covers its path. After the',
+        '  next backup run, its line here names the newest snapshot if one does.',
+    )
+
+    help_section('Examples')
+    help_row('safekeep files list --missing', '', 'What older snapshots hold that this machine lacks')
+    help_row('safekeep files list --from 2026-08-04', '', 'Everything one snapshot holds, flat')
+    help_row('safekeep files list --missing --json', '', "The same, with each stored copy's path")
+
+    help_end()
+
+
 def show_tags_help():
     help_header('safekeep tags', 'The tags a restore can select on, and what each would bring back.')
     help_usage('safekeep tags <verb>')
@@ -2191,10 +2413,12 @@ def show_restore_help():
     help_section('Selection')
     help_text('  Required, and never inferred. Pass at least one:')
     help_row('--all', '', 'Every source in the snapshot')
-    help_row('--source', '<path>', 'Sources whose path contains PATH (repeatable)')
+    help_row('--source', '<path>', 'Sources whose path contains PATH, or one file or directory inside one')
     help_row('--tag', '<name>', 'Sources carrying NAME (repeatable)')
     help_text(
         "  A source is one config entry — a path, or one repo's untracked and ignored files.",
+        '  --source is repeatable, and a full path to something inside a source restores',
+        '  that alone — `safekeep files list` prints those paths, one line per file.',
         '  A tag selects on the snapshot, which carries the tags its config had that day.',
         '  `safekeep tags show <name>` is what says whether this one selects anything.',
     )
@@ -2217,6 +2441,7 @@ def show_restore_help():
     help_row('safekeep restore --to /tmp/rehearsal --all', '', 'Rehearse first — always')
     help_row('safekeep restore --to / --tag secrets', '', 'Restore one tag for real')
     help_row('safekeep restore --to / --from 2026-07-01 --all', '', 'Restore an older snapshot')
+    help_row('safekeep restore --to / --from 2026-07-01 --source ~/.ssh/config', '', 'Bring back one file')
 
     help_end()
 
@@ -2281,6 +2506,15 @@ def build_parser():
     snapshots_show.add_argument('date', nargs='?', metavar='DATE')
     snapshots_show.add_argument('--source', metavar='PATH')
 
+    files = commands.add_parser('files', add_help=False)
+    files.add_argument('-h', '--help', action='store_true', dest='show_help')
+    files_commands = files.add_subparsers(dest='files_command', metavar='COMMAND')
+    files_list = files_commands.add_parser('list', add_help=False)
+    files_list.add_argument('-h', '--help', action='store_true', dest='show_help')
+    files_list.add_argument('--from', dest='from_date', metavar='DATE')
+    files_list.add_argument('--missing', action='store_true')
+    files_list.add_argument('--json', action='store_true', dest='as_json')
+
     tags = commands.add_parser('tags', add_help=False)
     tags.add_argument('-h', '--help', action='store_true', dest='show_help')
     tags_commands = tags.add_subparsers(dest='tags_command', metavar='COMMAND')
@@ -2333,6 +2567,7 @@ def build_parser():
 SCREENS = {
     'backup': show_backup_help,
     'snapshots': show_snapshots_help,
+    'files': show_files_help,
     'tags': show_tags_help,
     'restore': show_restore_help,
     'config': show_config_help,
@@ -2343,6 +2578,7 @@ SCREENS = {
 NAMESPACE_VERBS = {
     'backup': 'backup_command',
     'snapshots': 'snapshots_command',
+    'files': 'files_command',
     'tags': 'tags_command',
     'config': 'config_command',
 }
@@ -2469,6 +2705,8 @@ def main():
             show_snapshot_source_files(dest, args.date, args.source)
         else:
             show_snapshot_record(dest, args.date)
+    elif args.command == 'files':
+        show_files(config, args)
     elif args.command == 'tags':
         if args.tags_command == 'list':
             show_tag_list(config, config_path, args)

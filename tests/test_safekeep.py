@@ -127,7 +127,7 @@ def test_explicit_help_is_a_satisfied_request(tmp_path):
 
 def test_help_lists_every_public_command(tmp_path):
     result = run_safekeep('--help')
-    for command in ('backup', 'snapshots', 'tags', 'restore', 'config'):
+    for command in ('backup', 'snapshots', 'files', 'tags', 'restore', 'config'):
         assert command in result.stdout
 
 
@@ -203,7 +203,7 @@ def test_every_command_in_the_tree_is_documented(tmp_path):
     assert run_safekeep('preview-snapshot', '2026-08-13').returncode == 2
 
 
-@pytest.mark.parametrize('namespace', ['backup', 'snapshots', 'tags', 'config'])
+@pytest.mark.parametrize('namespace', ['backup', 'snapshots', 'files', 'tags', 'config'])
 def test_a_bare_namespace_shows_its_own_help(tmp_path, namespace):
     """A namespace names a resource without selecting a verb, so it prints the screen that
     completes the command line rather than guessing which verb was meant."""
@@ -225,7 +225,7 @@ def test_a_bare_backup_writes_nothing(tmp_path, source_tree):
 
 
 def test_a_namespace_screen_names_its_verbs(tmp_path):
-    for namespace, verbs in (('snapshots', ('list', 'show')), ('tags', ('list', 'show')), ('backup', ('run',))):
+    for namespace, verbs in (('snapshots', ('list', 'show')), ('files', ('list',)), ('tags', ('list', 'show')), ('backup', ('run',))):
         result = run_safekeep(namespace, '--help')
         assert result.returncode == 0
         for verb in verbs:
@@ -799,6 +799,30 @@ def snapshot_copy_of(snapshot_dir, source_file):
     return snapshot_dir / safekeep.snapshot_rel(source_file)
 
 
+def relocate_under_home(snapshot_dir, source, other_home):
+    """Rewrite a one-source snapshot as though it was taken with `source` under another home.
+
+    The manifest, the recorded modes and the stored tree all move, which is what a snapshot from
+    a machine with another username looks like. Returns the source as that snapshot records it.
+    """
+    moved = f'{other_home}/{Path(source).name}'
+    old_rel, new_rel = safekeep.snapshot_rel(source), safekeep.snapshot_rel(moved)
+
+    manifest_path = snapshot_dir / safekeep.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest['home'] = other_home
+    manifest['groups'][0]['source'] = moved
+    manifest['modes'] = {
+        (new_rel + key[len(old_rel) :] if key.startswith(old_rel) else key): mode for key, mode in manifest['modes'].items()
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+    relocated = snapshot_dir / new_rel
+    relocated.parent.mkdir(parents=True, exist_ok=True)
+    (snapshot_dir / old_rel).rename(relocated)
+    return moved
+
+
 def test_an_unchanged_file_is_hard_linked_into_the_next_snapshot(tmp_path, source_tree):
     """The dedup that made backup-incremental a separate tool, inside the tool with the manifest."""
     dest = tmp_path / 'dest'
@@ -1261,6 +1285,98 @@ def test_a_bare_string_tag_is_fatal(tmp_path, source_tree):
     assert 'list of strings' in result.stderr
 
 
+# --- files ----------------------------------------------------------------------------
+
+
+def two_machines(tmp_path, source_tree):
+    """An older snapshot holding files the source has since lost, then a newer one without them.
+
+    The work-box case: one WSL image backed these up, the next never got them back, and every
+    snapshot since was taken without them. One of them is nested deep, which is the shape that
+    made a per-snapshot tree large for the few files that mattered.
+    """
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    deep = source_tree / 'notes' / 'a' / 'b' / 'c' / 'deep.md'
+    deep.parent.mkdir(parents=True)
+    deep.write_text('deep\n')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    age_todays_snapshot(dest)
+
+    shutil.rmtree(source_tree / 'notes' / 'a')
+    (source_tree / 'notes' / 'secret.txt').unlink()
+    (source_tree / 'notes' / 'plain.md').write_text('changed\n')
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    return config_path, dest
+
+
+def files_json(config_path, *args, env=None):
+    result = run_safekeep('--config', str(config_path), 'files', 'list', '--json', *args, env=env)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_files_missing_names_what_only_an_older_snapshot_holds(tmp_path, source_tree):
+    config_path, _ = two_machines(tmp_path, source_tree)
+    rows = files_json(config_path, '--missing')
+    assert {row['path'] for row in rows} == {
+        str(source_tree / 'notes' / 'secret.txt'),
+        str(source_tree / 'notes' / 'a' / 'b' / 'c' / 'deep.md'),
+    }
+    assert {row['snapshot'] for row in rows} == {'2020-01-01'}
+    assert not any(row['here'] for row in rows)
+
+
+def test_files_takes_each_file_from_the_newest_snapshot_holding_it(tmp_path, source_tree):
+    config_path, dest = two_machines(tmp_path, source_tree)
+    rows = {row['path']: row for row in files_json(config_path)}
+    newest = rows[str(source_tree / 'notes' / 'plain.md')]
+    assert newest['snapshot'] == latest_snapshot(dest).name
+    assert newest['here']
+    assert Path(newest['stored']).read_text() == 'changed\n'
+
+
+def test_files_from_reads_only_the_snapshot_named(tmp_path, source_tree):
+    config_path, _ = two_machines(tmp_path, source_tree)
+    rows = files_json(config_path, '--from', '2020-01-01')
+    assert {row['snapshot'] for row in rows} == {'2020-01-01'}
+    older = next(row for row in rows if row['path'] == str(source_tree / 'notes' / 'plain.md'))
+    assert Path(older['stored']).read_text() == 'plain\n'
+
+
+def test_files_names_a_file_where_it_belongs_on_this_machine(tmp_path, source_tree):
+    """A snapshot taken under another username still lines up with this machine's home, which is
+    what decides whether the file is here."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    relocate_under_home(latest_snapshot(dest), source_tree / 'notes', '/home/someone-else')
+
+    home = tmp_path / 'home'
+    env = {**os.environ, 'HOME': str(home)}
+    wanted = str(home / 'notes' / 'plain.md')
+    assert not next(row for row in files_json(config_path, env=env) if row['path'] == wanted)['here']
+
+    (home / 'notes').mkdir(parents=True)
+    (home / 'notes' / 'plain.md').write_text('plain\n')
+    assert next(row for row in files_json(config_path, env=env) if row['path'] == wanted)['here']
+
+
+def test_files_hands_over_the_restore_that_brings_one_back(tmp_path, source_tree):
+    config_path, _ = two_machines(tmp_path, source_tree)
+    out = plain(run_safekeep('--config', str(config_path), 'files', 'list', '--missing').stdout)
+    assert 'safekeep restore --to / --from 2020-01-01 --source ' in out
+
+
+def test_an_empty_files_listing_is_an_empty_array(tmp_path, source_tree):
+    """Before the first backup, and after one that left nothing behind."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    assert files_json(config_path) == []
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    assert files_json(config_path, '--missing') == []
+
+
 # --- config edit ----------------------------------------------------------------------
 
 
@@ -1600,22 +1716,7 @@ def test_restore_remaps_a_different_home(tmp_path, source_tree):
     target = tmp_path / 'target'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     run_safekeep('--config', str(config_path), 'backup', 'run')
-
-    snapshot = next(d for d in dest.iterdir() if d.is_dir())
-    manifest_path = snapshot / safekeep.MANIFEST_NAME
-    manifest = json.loads(manifest_path.read_text())
-
-    fake_home = '/home/someone-else'
-    moved = fake_home + '/notes'
-    manifest['home'] = fake_home
-    manifest['groups'][0]['source'] = moved
-    manifest['modes'] = {safekeep.snapshot_rel(moved + '/secret.txt'): '0600'}
-    manifest_path.write_text(json.dumps(manifest))
-
-    stored = snapshot / safekeep.snapshot_rel(source_tree / 'notes')
-    relocated = snapshot / safekeep.snapshot_rel(moved)
-    relocated.parent.mkdir(parents=True, exist_ok=True)
-    stored.rename(relocated)
+    relocate_under_home(latest_snapshot(dest), source_tree / 'notes', '/home/someone-else')
 
     run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--all')
 
@@ -1638,6 +1739,90 @@ def test_group_selection_matches_on_substring():
 def test_group_selection_returns_none_when_nothing_specified():
     args = type('Args', (), {'all': False, 'source': [], 'tag': []})()
     assert safekeep.select_groups({'groups': []}, args) is None
+
+
+def test_group_selection_matches_a_source_as_this_machine_names_it(monkeypatch):
+    """`files list` prints a single-file source under this machine's home, and the snapshot
+    recorded it under the home it was taken in."""
+    monkeypatch.setenv('HOME', '/home/new')
+    manifest = {
+        'home': '/home/old',
+        'groups': [
+            {'kind': 'path', 'source': '/home/old/.gitconfig', 'tags': []},
+            {'kind': 'path', 'source': '/home/old/notes', 'tags': []},
+        ],
+    }
+    args = type('Args', (), {'all': False, 'source': ['/home/new/.gitconfig'], 'tag': []})()
+    assert [g['source'] for g in safekeep.select_groups(manifest, args)] == ['/home/old/.gitconfig']
+
+
+def test_restore_source_inside_a_source_restores_that_file_alone(tmp_path, source_tree):
+    """`files list` prints one path per file, and that path is what gets handed to restore."""
+    secret = source_tree / 'notes' / 'secret.txt'
+    restore, target = backup_and_restore(tmp_path, source_tree, '--source', str(secret))
+    assert restore.returncode == 0, restore.stderr
+
+    landed = target / safekeep.snapshot_rel(secret)
+    assert landed.read_text() == 'secret\n'
+    assert stat.S_IMODE(landed.stat().st_mode) == 0o600
+    assert not (landed.parent / 'plain.md').exists()
+    assert not (target / safekeep.snapshot_rel(source_tree / 'solo.conf')).exists()
+
+
+def test_restore_source_inside_a_source_takes_a_whole_directory(tmp_path, source_tree):
+    sub = source_tree / 'notes' / 'sub'
+    sub.mkdir()
+    (sub / 'one.md').write_text('one\n')
+    (sub / 'two.md').write_text('two\n')
+    restore, target = backup_and_restore(tmp_path, source_tree, '--source', str(sub))
+    assert restore.returncode == 0, restore.stderr
+
+    landed = target / safekeep.snapshot_rel(sub)
+    assert sorted(path.name for path in landed.iterdir()) == ['one.md', 'two.md']
+    assert not (landed.parent / 'plain.md').exists()
+
+
+def test_restoring_one_file_puts_back_the_modes_of_the_directories_it_creates(tmp_path, source_tree):
+    """One file into a fresh ~/.ssh is exactly when that directory's 0700 has to come back. The
+    whole-source restore always had the directory as an entry; one file inside it has to add it."""
+    private = source_tree / 'notes' / 'private'
+    private.mkdir()
+    (private / 'key').write_text('key\n')
+    private.chmod(0o700)
+    (source_tree / 'notes').chmod(0o755)
+
+    restore, target = backup_and_restore(tmp_path, source_tree, '--source', str(private / 'key'))
+    assert restore.returncode == 0, restore.stderr
+    assert stat.S_IMODE((target / safekeep.snapshot_rel(private)).stat().st_mode) == 0o700
+    assert stat.S_IMODE((target / safekeep.snapshot_rel(source_tree / 'notes')).stat().st_mode) == 0o755
+
+
+def test_restore_source_naming_nothing_the_snapshot_holds_fails(tmp_path, source_tree):
+    restore, target = backup_and_restore(tmp_path, source_tree, '--source', str(source_tree / 'notes' / 'never.md'))
+    assert restore.returncode == 1
+    assert 'nothing at that path' in plain(restore.stderr)
+    assert not target.exists()
+
+
+def test_restore_source_finds_a_path_this_machine_names_under_another_home(tmp_path, source_tree):
+    """The snapshot recorded the file under the home it was taken in, and the path handed over is
+    under this machine's, so it is mapped back before being looked up."""
+    dest = tmp_path / 'dest'
+    target = tmp_path / 'target'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    relocate_under_home(latest_snapshot(dest), source_tree / 'notes', '/home/someone-else')
+
+    home = tmp_path / 'home'
+    secret_here = home / 'notes' / 'secret.txt'
+    env = {**os.environ, 'HOME': str(home)}
+    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--source', str(secret_here), env=env)
+    assert restore.returncode == 0, restore.stderr
+
+    landed = target / safekeep.snapshot_rel(secret_here)
+    assert landed.read_text() == 'secret\n'
+    assert stat.S_IMODE(landed.stat().st_mode) == 0o600
+    assert not (landed.parent / 'plain.md').exists()
 
 
 def test_repo_groups_sharing_a_subtree_are_restored_once(tmp_path):

@@ -6,4 +6,4 @@ long-form documentation; `README.md` at the repo root is the short version.
 
 ## Documentation
 
-- [Reference](reference.md) — The config schema and how a schema change is handled, the snapshot layout at the destination, the manifest format, and what backup, tags and restore each do
+- [Reference](reference.md) — The config schema and how a schema change is handled, the snapshot layout at the destination, the manifest format, what backup, tags, files and restore each do, and how to bring back what an older machine had
