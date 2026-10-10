@@ -2259,6 +2259,6 @@ def test_update_hands_its_flags_to_the_shared_updater(monkeypatch):
     """The updater itself is pyselfupdate's and reaches the network, so it is replaced here."""
     calls = []
     monkeypatch.setattr(safekeep.main, 'run_update', lambda config, **flags: calls.append((config.tool, flags)))
-    result = CliRunner().invoke(safekeep.main.app, ['update', '--check', '--no-changelog'])
+    result = CliRunner().invoke(safekeep.main.app, ['update', '--check'])
     assert result.exit_code == 0, result.output
-    assert calls == [('safekeep', {'check_only': True, 'skip_changelog': True})]
+    assert calls == [('safekeep', {'check_only': True, 'skip_changelog': False})]
