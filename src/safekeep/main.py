@@ -69,6 +69,25 @@ class InWorkflowOrder(TyperGroup):
     def list_commands(self, ctx: object) -> list[str]:
         return sorted(self.commands, key=lambda name: self.ORDER.index(name) if name in self.ORDER else len(self.ORDER))
 
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        """A root option typed after the command fails with the command printed with it moved before."""
+        valued = {opt for param in self.params if not getattr(param, 'is_flag', True) for opt in param.opts}
+        movable = {opt for param in self.params if param.name in ('config', 'no_input') for opt in param.opts}
+        at = 0
+        while at < len(args) and args[at].startswith('-'):
+            at += 2 if args[at] in valued else 1
+        if at < len(args) and args[at] in self.commands:
+            rest = args[at + 1 :]
+            for i, word in enumerate(rest):
+                if word == '--':
+                    break
+                flag = word.split('=', 1)[0]
+                if flag in movable:
+                    width = 2 if word in valued else 1
+                    retry = shlex.join(['safekeep', *args[:at], *rest[i : i + width], args[at], *rest[:i], *rest[i + width :]])
+                    ctx.fail(f'No such option: {flag} after the command. It belongs to safekeep itself, so it goes before:\n{retry}')
+        return super().parse_args(ctx, args)
+
 
 class Namespace(TyperGroup):
     """A namespace takes only a verb, so an option typed before one belongs to a verb.
@@ -80,9 +99,14 @@ class Namespace(TyperGroup):
         if args and args[0].startswith('-') and args[0] not in ctx.help_option_names:
             flag = args[0].split('=', 1)[0]
             verbs = [name for name, command in self.commands.items() if any(flag in param.opts for param in command.params)]
-            if verbs:
-                typed = sys.argv[1:]
-                before = typed[: len(typed) - len(args)] if typed[len(typed) - len(args) :] == args else ctx.command_path.split()[1:]
+            typed = sys.argv[1:]
+            before = typed[: len(typed) - len(args)] if typed[len(typed) - len(args) :] == args else ctx.command_path.split()[1:]
+            # A verb typed after the options is the one they were meant for, so they move behind it.
+            at = next((i for i, word in enumerate(args) if word in self.commands), None)
+            if at is not None and args[at] in verbs:
+                retry = shlex.join(['safekeep', *before, args[at], *args[at + 1 :], *args[:at]])
+                ctx.fail(f'No such option: {flag}. It belongs to {args[at]}, so it goes after it:\n{retry}')
+            if at is None and verbs:
                 retries = '\n'.join(shlex.join(['safekeep', *before, verb, *args]) for verb in verbs)
                 ctx.fail(f'No such option: {flag}. It belongs to a verb, so it goes after one:\n{retries}')
         return super().parse_args(ctx, args)
@@ -117,7 +141,7 @@ app = typer.Typer(
         ('safekeep files list --missing', 'what older snapshots hold that this machine lacks'),
         (f'safekeep restore --to {REHEARSE_INTO} --all', 'rehearse restoring the newest snapshot'),
         ('safekeep restore --to / --tag secrets', 'restore the sources tagged secrets, for real'),
-        ('safekeep -c work snapshots list', 'the same, reading the config named work'),
+        ('safekeep -c work snapshots list', 'the snapshots of the config named work'),
     ),
 )
 
@@ -250,8 +274,9 @@ def backup_run(
     what it collected, so it writes a partial snapshot beside the full one rather than topping it up.
     `safekeep tags list` says which tags there are to narrow by.
 
-    Each file copied is named as it is copied. A file unchanged since the previous snapshot becomes
-    a hard link into it rather than a copy, so it costs no space and is not named.
+    Each file copied is named as it is copied. A file unchanged since the previous snapshot is not
+    named: it becomes a hard link into that snapshot, costing no space, or a full copy where the
+    destination cannot hard-link. The run's last line says which of the two happened.
 
     A label is free text that `snapshots list` and `snapshots show` print beside the snapshot, and
     that a restore shows when it lists snapshots to choose from. A date says when a snapshot was
@@ -301,8 +326,6 @@ def snapshots_list(ctx: typer.Context, as_json: JsonOption = False) -> None:
     show_snapshot_list(destination(config), config_path, as_json)
 
 
-# A miss exits 0 without --json because this is also the restore picker's preview pane, which has
-# nowhere else to show one.
 @snapshots_app.command(
     'show',
     epilog=examples(
@@ -326,8 +349,7 @@ def snapshots_show(
 ) -> None:
     """One snapshot: the machine and config that wrote it, and its sources with their sizes and tags.
 
-    Without `--json` an absent snapshot or source prints the reason and exits 0. With `--json` it
-    exits 1, so a script can tell an answer from a miss.
+    An absent snapshot or source prints the reason on stderr and exits 1.
     """
     config_path, config, _ = loaded(ctx)
     if date is None:
@@ -568,7 +590,7 @@ config_app = typer.Typer(
     """,
     epilog=examples(
         ('safekeep config init', 'a first config, named default'),
-        ('safekeep config init work', 'a second destination, which -c work then reads'),
+        ('safekeep config init work', 'a second config, which -c work then reads'),
         ('safekeep config show', 'the config in use, and which file it is'),
         ('safekeep config edit', 'change it, and have it checked when the editor closes'),
     ),

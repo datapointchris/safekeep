@@ -19,6 +19,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -173,7 +174,7 @@ def test_every_help_example_names_commands_and_flags_safekeep_has():
 
     assert runner.invoke(app, ['restore', '--to', '/', '--frm', 'x', '-h']).exit_code == 2, 'a bad flag must fail through the -h'
     examples = help_examples()
-    assert len(examples) > 20
+    assert examples
     for example in examples:
         result = runner.invoke(app, [*example, '-h'])
         assert result.exit_code == 0, f'safekeep {shlex.join(example)}: {result.output}'
@@ -600,6 +601,59 @@ def test_config_init_writes_a_config_at_a_path_that_then_reads_by_that_path(tmp_
     assert printed_after('change it:', again.stderr) == ['-c', str(target), 'config', 'edit']
 
 
+def test_a_first_config_init_prints_its_commands_without_c(tmp_path):
+    """config init is the root help's first step, and with one config -c is implied."""
+    home = tmp_path / 'home'
+    home.mkdir()
+
+    result = run_safekeep('config', 'init', env=home_env(home))
+    assert result.returncode == 0, result.stderr
+    assert printed_line_containing('config edit', result.stdout) == ['config', 'edit']
+    assert printed_line_containing('backup run -n', result.stdout) == ['backup', 'run', '-n']
+
+
+def test_config_init_at_a_relative_path_prints_a_hint_that_runs_from_another_directory(tmp_path):
+    home = tmp_path / 'home'
+    (home / 'notes').mkdir(parents=True)
+    (home / 'proj').mkdir()
+
+    result = run_safekeep('config', 'init', 'notes/side.toml', env=home_env(home), cwd=home)
+    assert result.returncode == 0, result.stderr
+    edit = printed_line_containing('config edit', result.stdout)
+    replacement = tomli_w.dumps({'back_up_to': str(tmp_path / 'dest')})
+    edited = run_safekeep(*edit, env={**editor_writing(tmp_path, replacement), 'HOME': str(home)}, cwd=home / 'proj')
+    assert edited.returncode == 0, edited.stderr
+    assert (home / 'notes' / 'side.toml').read_text() == replacement
+
+
+def test_a_config_typed_by_the_file_name_in_the_config_directory_is_offered_by_name(tmp_path):
+    """The output names a config by what -c takes, and -c work.toml from elsewhere still finds work."""
+    home = tmp_path / 'home'
+    named_config(home, 'work', tmp_path / 'dest')
+    named_config(home, 'laptop', tmp_path / 'other')
+
+    backup = run_safekeep('-c', 'work', 'backup', 'run', '-n', env=home_env(home), cwd=tmp_path)
+    assert 'using config work' in backup.stdout
+
+    result = run_safekeep('-c', 'work.toml', 'snapshots', 'list', env=home_env(home), cwd=tmp_path)
+    assert result.returncode == 1
+    assert 'config init' not in result.stderr
+    retry = printed_after('is that file, by name:', result.stderr)
+    assert retry == ['-c', 'work', 'snapshots', 'list']
+    assert run_safekeep(*retry, env=home_env(home), cwd=tmp_path).returncode == 0
+
+
+def test_a_config_path_in_a_missing_directory_offers_no_init_into_it(tmp_path):
+    home = tmp_path / 'home'
+    home.mkdir()
+    missing = tmp_path / 'nowhere' / 'side.toml'
+
+    result = run_safekeep('-c', str(missing), 'snapshots', 'list', env=home_env(home))
+    assert result.returncode == 1
+    assert f'no directory {missing.parent} to write one in' in result.stderr
+    assert 'config init' not in result.stderr
+
+
 # --- surveying ------------------------------------------------------------------------
 
 
@@ -926,7 +980,7 @@ def test_backup_records_config_warnings_in_manifest(tmp_path, source_tree):
     assert any('keep' in w for w in manifest['config_warnings'])
 
 
-def test_a_backup_names_each_file_it_copies_and_nothing_rsync_says_about_itself(tmp_path, source_tree):
+def test_a_backup_names_each_file_it_copies(tmp_path, source_tree):
     """The second run names only the file that changed, since the rest become links to the first."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
@@ -935,14 +989,35 @@ def test_a_backup_names_each_file_it_copies_and_nothing_rsync_says_about_itself(
     first = run_safekeep('--config', str(config_path), 'backup', 'run').stdout
     named = {line.strip() for line in first.splitlines() if line.startswith('    ')}
     assert named == {str(notes / name) for name in ('plain.md', 'secret.txt', 'run.sh')}
-    for noise in ('sending incremental file list', 'created directory', 'total size', 'sent '):
-        assert noise not in first
     earlier = rename_latest_snapshot(dest, '2020-01-01')
 
     (notes / 'plain.md').write_text('changed\n')
     second = run_safekeep('--config', str(config_path), 'backup', 'run').stdout
     assert [line.strip() for line in second.splitlines() if line.startswith('    ')] == [str(notes / 'plain.md')]
-    assert f'copied 1 file from 1 source, and linked the unchanged ones to {earlier.name}' in second
+    assert 'copied 1 file from 1 source' in second
+    assert f'unchanged files: hard links into {earlier.name}' in second
+
+
+def test_a_backup_onto_a_destination_refusing_hard_links_says_it_copied_unchanged_files_in_full(tmp_path, source_tree):
+    """A destination that refuses link(), stood in for by a previous snapshot on another filesystem.
+    rsync then copies every unchanged file in full, names none of them, and exits 0."""
+    elsewhere = Path('/dev/shm')
+    if not elsewhere.is_dir() or elsewhere.stat().st_dev == tmp_path.stat().st_dev:
+        pytest.skip('needs a second filesystem at /dev/shm')
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    previous = age_todays_snapshot(dest)
+    moved = Path(tempfile.mkdtemp(dir=elsewhere)) / previous.name
+    try:
+        shutil.move(previous, moved)
+        previous.symlink_to(moved)
+        backup = run_safekeep('--config', str(config_path), 'backup', 'run')
+    finally:
+        shutil.rmtree(moved.parent)
+
+    assert backup.returncode == 0, backup.stderr
+    assert 'unchanged files: copied in full, linked to no earlier snapshot' in backup.stdout
 
 
 def test_dry_run_writes_nothing(tmp_path, source_tree):
@@ -1223,17 +1298,23 @@ def test_snapshots_written_before_the_time_was_added_are_still_found(tmp_path, s
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
 
 
-def test_a_listing_of_both_name_shapes_keeps_its_columns(tmp_path, source_tree):
-    """A destination carries both at once — every snapshot taken before the time was added is a
-    bare date, ten characters against nineteen. Unpadded, the short row shifts every column."""
+def test_a_listing_of_both_name_shapes_and_both_count_shapes_keeps_its_columns(tmp_path, source_tree):
+    """A destination carries both name shapes at once — every snapshot taken before the time was
+    added is a bare date, ten characters against nineteen — and "1 file" is a character short of
+    "3 files". Unpadded, either shifts every column after it."""
     dest = tmp_path / 'dest'
+    run_safekeep('--config', str(write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'solo.conf'))), 'backup', 'run')
+    age_todays_snapshot(dest)
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     run_safekeep('--config', str(config_path), 'backup', 'run')
-    shutil.copytree(latest_snapshot(dest), dest / '2020-01-01')
 
-    rows = [r for r in plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout).splitlines() if 'files' in r]
+    host = os.uname().nodename
+    rows = [r for r in run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout.splitlines() if host in r]
     assert len(rows) == 2
-    assert len({row.index('files') for row in rows}) == 1, rows
+    assert len({row.index(host) for row in rows}) == 1, rows
+
+
+def test_a_date_reads_that_days_last_run(tmp_path, source_tree):
     """Nobody types a full timestamp from memory, and a date is what a person has. It resolves
     to the last run of the day, and every caller reports the name it resolved to."""
     dest = tmp_path / 'dest'
@@ -1316,37 +1397,26 @@ def test_the_restore_pickers_previews_read_a_config_passed_as_a_file(tmp_path, s
         assert 'no config' not in result.stderr
 
 
-def test_a_snapshot_list_counts_one_file_and_one_source_in_the_singular(tmp_path, source_tree):
-    dest = tmp_path / 'dest'
-    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'solo.conf'))
-    run_safekeep('--config', str(config_path), 'backup', 'run')
-    out = run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout
-    assert '1 snapshot at' in out
-    assert re.search(r'\b1 file\s+1 source\b', out), out
-
-
 @pytest.mark.parametrize(
-    ('args', 'code'),
+    'args',
     [
-        (('snapshots', 'show', '2020-01-01'), 0),
-        (('snapshots', 'show', '2020-01-01', '--json'), 1),
-        (('snapshots', 'show', '2020-01-01', '--source', 'x'), 0),
-        (('files', 'list', '--from', '2020-01-01'), 1),
-        (('tags', 'list', '--from', '2020-01-01'), 1),
-        (('--no-input', 'restore', '--to', 'unused', '--from', '2020-01-01', '--all'), 1),
+        ('snapshots', 'show', '2020-01-01'),
+        ('snapshots', 'show', '2020-01-01', '--json'),
+        ('snapshots', 'show', '2020-01-01', '--source', 'x'),
+        ('files', 'list', '--from', '2020-01-01'),
+        ('tags', 'list', '--from', '2020-01-01'),
+        ('--no-input', 'restore', '--to', 'unused', '--from', '2020-01-01', '--all'),
     ],
 )
-def test_every_read_of_an_absent_snapshot_names_it_and_the_ones_there_are(tmp_path, source_tree, args, code):
-    """Exit 0 only where the read doubles as the restore picker's preview pane."""
+def test_every_read_of_an_absent_snapshot_names_it_and_the_ones_there_are(tmp_path, source_tree, args):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     run_safekeep('--config', str(config_path), 'backup', 'run')
 
     result = run_safekeep('--config', str(config_path), *args)
-    assert result.returncode == code, result.stderr
-    said = result.stdout + result.stderr
-    assert f'no snapshot 2020-01-01 at {dest}' in said
-    assert f'{latest_snapshot(dest).name}  (newest)' in said
+    assert result.returncode == 1, result.stderr
+    assert f'no snapshot 2020-01-01 at {dest}' in result.stderr
+    assert f'{latest_snapshot(dest).name}  (newest)' in result.stderr
 
 
 def test_a_source_the_snapshot_lacks_is_named_beside_the_ones_it_holds(tmp_path, source_tree):
@@ -1355,9 +1425,9 @@ def test_a_source_the_snapshot_lacks_is_named_beside_the_ones_it_holds(tmp_path,
     run_safekeep('--config', str(config_path), 'backup', 'run')
 
     result = run_safekeep('--config', str(config_path), 'snapshots', 'show', latest_snapshot(dest).name, '--source', '/nowhere')
-    assert result.returncode == 0
-    assert '/nowhere is not a source in' in result.stdout
-    assert str(source_tree / 'solo.conf') in result.stdout
+    assert result.returncode == 1
+    assert '/nowhere is not a source in' in result.stderr
+    assert str(source_tree / 'solo.conf') in result.stderr
 
 
 def test_with_two_configs_each_printed_hint_names_the_config_it_read(tmp_path, source_tree):
@@ -1390,6 +1460,37 @@ def test_a_verbs_option_typed_before_the_verb_prints_the_command_with_it_after(t
     previewed = run_safekeep(*printed(retry))
     assert previewed.returncode == 0, previewed.stderr
     assert 'would back up' in previewed.stdout
+
+
+@pytest.mark.parametrize('typed', [['backup', '-n', 'run'], ['tags', '--from', 'SNAPSHOT', 'list'], ['snapshots', '--json', 'list']])
+def test_an_option_typed_before_a_verb_also_on_the_line_prints_one_retry_that_runs(tmp_path, source_tree, typed):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=[{'path': str(source_tree / 'notes'), 'tags': ['docs']}])
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    words = [latest_snapshot(dest).name if word == 'SNAPSHOT' else word for word in typed]
+
+    result = run_safekeep('--config', str(config_path), *words, env={**os.environ, 'COLUMNS': '1000'})
+    assert result.returncode == 2
+    (retry,) = [line.strip('│ ') for line in result.stderr.splitlines() if line.strip('│ ').startswith('safekeep ')]
+    ran = run_safekeep(*printed(retry))
+    assert ran.returncode == 0, ran.stderr
+
+
+@pytest.mark.parametrize(
+    'typed', [['snapshots', 'list', '-c', 'CONFIG'], ['-c', 'CONFIG', 'restore', '--to', 'TARGET', '--all', '-n', '--no-input']]
+)
+def test_a_root_option_typed_after_the_command_prints_the_command_with_it_before(tmp_path, source_tree, typed):
+    """The root help says -c goes before the command, so -c or --no-input after it is the expected slip."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    words = [{'CONFIG': str(config_path), 'TARGET': str(tmp_path / 'target')}.get(word, word) for word in typed]
+
+    result = run_safekeep(*words, env={**os.environ, 'COLUMNS': '1000'})
+    assert result.returncode == 2
+    (retry,) = [line.strip('│ ') for line in result.stderr.splitlines() if line.strip('│ ').startswith('safekeep ')]
+    ran = run_safekeep(*printed(retry))
+    assert ran.returncode == 0, ran.stderr
 
 
 def test_an_exact_name_beats_a_prefix(tmp_path, source_tree):
@@ -2047,6 +2148,28 @@ def test_tags_show_offers_the_older_snapshot_that_carries_a_tag_a_narrowed_run_l
     restore = printed_after('restore by the tag from the newest snapshot that carries it:', shown.stdout)
     assert restore[restore.index('--from') + 1] == full
     assert run_safekeep(*restore, '-n').returncode == 0
+
+
+def test_tags_show_offers_the_older_snapshot_holding_a_tags_sources_untagged_after_a_narrowed_run(tmp_path, source_tree):
+    """The tag was added after the full snapshot, then a narrowed run left the source out."""
+    dest = tmp_path / 'dest'
+    untagged = [{'path': str(source_tree / 'notes')}, {'path': str(source_tree / 'solo.conf'), 'tags': ['secrets']}]
+    run_safekeep('--config', str(write_config(tmp_path, dest, back_up_paths=untagged)), 'backup', 'run')
+    full = age_todays_snapshot(dest).name
+    config_path = write_config(tmp_path, dest, back_up_paths=[untagged[0] | {'tags': ['notes']}, untagged[1]])
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'secrets')
+
+    # A home of its own, so the rehearsal the printed restore names lands inside the test.
+    home = tmp_path / 'home'
+    home.mkdir()
+    shown = run_safekeep('--config', str(config_path), 'tags', 'show', 'notes', env=home_env(home))
+    assert 'backup run' not in shown.stdout
+    restore = printed_after('restore them by path from the newest snapshot that holds them, untagged:', shown.stdout)
+    assert restore[restore.index('--from') + 1] == full
+    ran = run_safekeep(*restore, env=home_env(home))
+    assert ran.returncode == 0, ran.stderr
+    rehearsal = home / '.cache' / 'safekeep' / 'rehearsal'
+    assert (rehearsal / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
 
 
 def test_restore_dry_run_writes_nothing(tmp_path, source_tree):

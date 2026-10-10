@@ -230,7 +230,7 @@ safekeep backup run --label 'before the wsl move'   # say why this one was taken
 
 A tag or path that matches nothing in the config is a usage error rather than a run that copies nothing, because a backup covering nothing reads exactly like one that covered everything it was asked to — the summary only reports what was copied.
 
-A run names each file it copies, by the path it was copied from, under the kind of source it came from: `paths`, `untracked` or `ignored`. A file unchanged since the previous snapshot becomes a hard link rather than a copy, so it goes unnamed. Each section's last line counts the files copied and names the snapshot the unchanged ones link to. `-n` names the same files and writes nothing, the destination directory included.
+A run names each file it copies, by the path it was copied from, under the kind of source it came from: `paths`, `untracked` or `ignored`. A file unchanged since the previous snapshot goes unnamed: it becomes a hard link into that snapshot, or a full copy where the destination cannot hard-link, and rsync reports neither. Each section's last line counts the files named. The run's last line reads the inodes after the copy and says which happened, in the words `snapshots show` uses: `unchanged files: hard links into <snapshot>` or `unchanged files: copied in full, linked to no earlier snapshot`. `-n` names the same files and writes nothing, the destination directory included.
 
 ### Labels
 
@@ -401,9 +401,9 @@ If the snapshot's home differs from the restoring machine's, paths under it are 
 **Fail fast**: If the destination doesn't exist or isn't writable, exit immediately.
 
 **Every read takes `--json`**, which prints JSON to stdout, and a listing with no rows prints `[]`.
-Without `--json`, `snapshots show` on an absent snapshot prints the reason and succeeds, because it
-is also the fzf preview pane. With `--json` it exits 1 instead, so a caller can tell an answer from a
-miss.
+An absent snapshot or source prints the reason on stderr and exits 1, with or without `--json`.
+The fzf preview panes run `snapshots show` too, and a pane shows stderr and a failed exit as it
+shows stdout.
 
 **Smart exclusions**: Default `skip_names_matching` list (`.venv`, `node_modules`, caches) applied to all rsync calls. Override in config.
 
