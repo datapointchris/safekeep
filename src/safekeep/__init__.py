@@ -2443,8 +2443,9 @@ def print_restores_of_the_rest(dest, snapshot_dir, manifest, request: RestoreReq
             )
         if offer.overlapping:
             rest = replace(request, all=False, source=offer.overlapping, tag=[], on_conflict=keep_newer)
+            overlap = 'overlaps' if len(offer.overlapping) == 1 else 'overlap'
             print(
-                f'  restore the {plural(len(offer.overlapping), "source")} from {cyan(offer.snapshot)} that overlap what was '
+                f'  restore the {plural(len(offer.overlapping), "source")} from {cyan(offer.snapshot)} that {overlap} what was '
                 f'restored before, keeping the newer copy of each file: '
                 f'{cyan(restore_command(rest, config_path, from_snapshot=offer.snapshot))}'
             )
