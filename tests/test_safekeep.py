@@ -896,6 +896,25 @@ def test_backup_records_config_warnings_in_manifest(tmp_path, source_tree):
     assert any('keep' in w for w in manifest['config_warnings'])
 
 
+def test_a_backup_names_each_file_it_copies_and_nothing_rsync_says_about_itself(tmp_path, source_tree):
+    """The second run names only the file that changed, since the rest become links to the first."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    notes = source_tree / 'notes'
+
+    first = run_safekeep('--config', str(config_path), 'backup', 'run').stdout
+    named = {line.strip() for line in first.splitlines() if line.startswith('    ')}
+    assert named == {str(notes / name) for name in ('plain.md', 'secret.txt', 'run.sh')}
+    for noise in ('sending incremental file list', 'created directory', 'total size', 'sent '):
+        assert noise not in first
+    earlier = rename_latest_snapshot(dest, '2020-01-01')
+
+    (notes / 'plain.md').write_text('changed\n')
+    second = run_safekeep('--config', str(config_path), 'backup', 'run').stdout
+    assert [line.strip() for line in second.splitlines() if line.startswith('    ')] == [str(notes / 'plain.md')]
+    assert f'copied 1 file from 1 source, and linked the unchanged ones to {earlier.name}' in second
+
+
 def test_dry_run_writes_nothing(tmp_path, source_tree):
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))

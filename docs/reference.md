@@ -225,9 +225,11 @@ safekeep backup run --source ~/notes    # only the entries whose path contains t
 safekeep backup run --label 'before the wsl move'   # say why this one was taken
 ```
 
-**Bare `backup` means everything, so `--tag` and `--source` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
+**`backup run` with no selection means everything, so `--tag` and `--source` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
 
 A tag or path that matches nothing in the config is a usage error rather than a run that copies nothing, because a backup covering nothing reads exactly like one that covered everything it was asked to — the summary only reports what was copied.
+
+A run names each file it copies, by the path it was copied from, under the kind of source it came from: `paths`, `untracked` or `ignored`. A file unchanged since the previous snapshot becomes a hard link rather than a copy, so it goes unnamed. Each section's last line counts the files copied and names the snapshot the unchanged ones link to. `-n` names the same files and writes nothing, the destination directory included.
 
 ### Labels
 

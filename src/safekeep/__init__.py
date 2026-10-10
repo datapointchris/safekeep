@@ -713,19 +713,19 @@ def link_dest_flags(link_dest):
 
 
 def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None, link_dest=None):
-    """Rsync absolute paths into dest_base, preserving full directory structure.
+    """Rsync absolute paths into dest_base, preserving full directory structure; returns the files copied.
 
     Uses rsync --relative with absolute paths so that '/home/chris/.ssh/config'
     becomes dest_base/home/chris/.ssh/config.
     """
     valid = [str(p) for p in paths if p.exists()]
     if not valid:
-        return
+        return 0
 
     if not dry_run:
         dest_base.mkdir(parents=True, exist_ok=True)
 
-    cmd = ['rsync', '-av', '--no-perms', '--chmod=Du+w', '--relative', '--copy-links']
+    cmd = ['rsync', '-a', '--no-perms', '--chmod=Du+w', '--relative', '--copy-links', *rsync_naming_flags()]
     cmd.extend(link_dest_flags(link_dest))
     for pattern in excludes:
         cmd.extend(['--exclude', pattern])
@@ -736,18 +736,18 @@ def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None, lin
     cmd.extend(valid)
     cmd.append(str(dest_base) + '/')
 
-    run_rsync(cmd)
+    return run_backup_rsync(cmd)
 
 
 def rsync_untracked(files, dest_base, dry_run=False, link_dest=None):
-    """Rsync individual untracked files preserving full path structure.
+    """Rsync individual untracked files preserving full path structure; returns the files copied.
 
     Uses --files-from with / as the base for efficiency when copying many
     small files. Paths are stored relative to filesystem root in the destination.
     """
     rel_paths = [snapshot_rel(f) for f in files]
     if not rel_paths:
-        return
+        return 0
 
     if not dry_run:
         dest_base.mkdir(parents=True, exist_ok=True)
@@ -757,13 +757,38 @@ def rsync_untracked(files, dest_base, dry_run=False, link_dest=None):
         tmp_path = tmp.name
 
     try:
-        cmd = ['rsync', '-av', '--no-perms', '--files-from', tmp_path, '/', str(dest_base) + '/']
+        cmd = ['rsync', '-a', '--no-perms', *rsync_naming_flags(), '--files-from', tmp_path, '/', str(dest_base) + '/']
         cmd.extend(link_dest_flags(link_dest))
         if dry_run:
             cmd.append('-n')
-        run_rsync(cmd)
+        return run_backup_rsync(cmd)
     finally:
         os.unlink(tmp_path)
+
+
+def copy_tally(dry_run, copied, origin, link_dest):
+    """One backup section's last line: the files rsync copied, and where the unchanged ones went."""
+    verb = yellow('would copy') if dry_run else green('copied')
+    linked = ''
+    if link_dest_flags(link_dest):
+        linked = f', and {"would link" if dry_run else "linked"} the unchanged ones to {cyan(Path(link_dest).name)}'
+    return f'{verb} {bold(plural(copied, "file"))} from {origin}{linked}'
+
+
+def run_backup_rsync(cmd):
+    """Run one backup rsync, naming each file it copies by the path it came from, and count them.
+
+    rsync names only what it writes, so a file unchanged since the previous snapshot is a hard
+    link and goes unnamed and uncounted.
+    """
+    copied = []
+
+    def report(name):
+        copied.append(name)
+        print(f'    {tilde("/" + name.lstrip("/"))}', flush=True)
+
+    run_rsync_naming_files(cmd, report)
+    return len(copied)
 
 
 @cache
@@ -842,10 +867,6 @@ def check_rsync(cmd, returncode):
         print(f'{red("safekeep:")} rsync exited {yellow(str(returncode))}', file=sys.stderr)
         print(f'  {shlex.join(cmd)}', file=sys.stderr)
         sys.exit(1)
-
-
-def run_rsync(cmd):
-    check_rsync(cmd, subprocess.run(cmd).returncode)
 
 
 def run_rsync_naming_files(cmd, report):
@@ -2405,14 +2426,13 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                 {'kind': 'path', 'source': str(path), 'tags': tags, 'files': survey['files'], 'bytes': survey['bytes']}
             )
             present.append(path)
-        rsync_paths(present, dest_base, excludes, request.dry_run, max_size_mb, link_dest)
-        verb = yellow('would copy') if request.dry_run else green('copied')
-        print(f'  {verb} {bold(plural(len(present), "path"))}')
+        copied = rsync_paths(present, dest_base, excludes, request.dry_run, max_size_mb, link_dest)
+        print(f'  {copy_tally(request.dry_run, copied, plural(len(present), "source"), link_dest)}')
 
     repos, back_up_untracked, ignored_patterns = repo_entries(config)
     repos = select_sources(repos, request)
     if repos and back_up_untracked:
-        print(f'\n{bold("git_untracked:")}')
+        print(f'\n{bold("untracked:")}')
         for repo_path, tags in repos:
             if not repo_path.exists():
                 print(f'  {yellow("skip:")} {yellow(str(repo_path))} (not found)')
@@ -2435,12 +2455,11 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                     'paths': [snapshot_rel(f) for f in copyable],
                 }
             )
-            rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
-            verb = yellow('would copy') if request.dry_run else green('copied')
-            print(f'  {verb} {bold(plural(survey["files"], "untracked file"))} from {cyan(str(repo_path))}')
+            copied = rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
+            print(f'  {copy_tally(request.dry_run, copied, cyan(tilde(str(repo_path))), link_dest)}')
 
     if ignored_patterns and repos:
-        print(f'\n{bold("git_ignored:")}')
+        print(f'\n{bold("ignored:")}')
         for repo_path, tags in repos:
             if not repo_path.exists():
                 continue
@@ -2461,9 +2480,8 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                     'paths': [snapshot_rel(f) for f in copyable],
                 }
             )
-            rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
-            verb = yellow('would copy') if request.dry_run else green('copied')
-            print(f'  {verb} {bold(plural(survey["files"], "ignored file"))} from {cyan(str(repo_path))}')
+            copied = rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
+            print(f'  {copy_tally(request.dry_run, copied, cyan(tilde(str(repo_path))), link_dest)}')
 
     total_files = sum(g['files'] for g in manifest['groups'])
     total_bytes = sum(g['bytes'] for g in manifest['groups'])
