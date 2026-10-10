@@ -1377,6 +1377,65 @@ def test_an_empty_files_listing_is_an_empty_array(tmp_path, source_tree):
     assert files_json(config_path, '--missing') == []
 
 
+# --- json -----------------------------------------------------------------------------
+
+
+def read_json(config_path, *args):
+    result = run_safekeep('--config', str(config_path), *args, '--json')
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_snapshots_list_json_flags_a_snapshot_without_a_manifest(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    assert read_json(config_path, 'snapshots', 'list') == []
+
+    run_safekeep('--config', str(config_path), 'backup', 'run', '--label', 'why')
+    (dest / '2020-01-01').mkdir()
+    newest, bare = read_json(config_path, 'snapshots', 'list')
+    assert (newest['label'], newest['sources'], newest['files']) == ('why', 1, 3)
+    assert (bare['name'], bare['restorable'], bare['files']) == ('2020-01-01', False, None)
+
+
+def test_snapshots_show_json_carries_its_sources_and_fails_on_an_absent_one(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    name = latest_snapshot(dest).name
+
+    record = read_json(config_path, 'snapshots', 'show', name)
+    assert [(row['source'], row['kinds'], row['files']) for row in record['sources']] == [(str(source_tree / 'notes'), ['path'], 3)]
+
+    files = read_json(config_path, 'snapshots', 'show', name, '--source', str(source_tree / 'notes'))
+    assert {row['path'] for row in files} == {str(source_tree / 'notes' / leaf) for leaf in ('plain.md', 'secret.txt', 'run.sh')}
+
+    absent = run_safekeep('--config', str(config_path), 'snapshots', 'show', '2020-01-01', '--json')
+    assert absent.returncode == 1
+    assert absent.stdout == ''
+
+
+def test_tags_json_sizes_each_tag_against_the_snapshot_it_names(tmp_path, source_tree):
+    dest = tmp_path / 'dest'
+    config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+
+    (docs,) = read_json(config_path, 'tags', 'list')
+    assert docs['tag'] == 'docs'
+    assert docs['snapshot'] == latest_snapshot(dest).name
+    assert [(row['source'], row['files'], row['note']) for row in docs['sources']] == [(str(source_tree / 'notes'), 3, None)]
+    assert read_json(config_path, 'tags', 'show', 'docs') == docs
+
+
+def test_config_show_json_is_the_config_as_resolved(tmp_path, source_tree):
+    config_path = write_config(tmp_path, tmp_path / 'dest', back_up_paths=paths(source_tree / 'notes'), surprise=1)
+    shown = read_json(config_path, 'config', 'show')
+    assert shown['back_up_paths'] == [{'path': str(source_tree / 'notes'), 'tags': []}]
+    assert shown['git']['back_up_untracked_files'] is True
+    assert shown['skip_names_matching'] == safekeep.DEFAULT_SKIP_NAMES
+    assert shown['warnings'] == ['surprise: unrecognized key, ignored']
+
+
 # --- config edit ----------------------------------------------------------------------
 
 

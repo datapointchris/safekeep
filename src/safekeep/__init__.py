@@ -228,6 +228,11 @@ def plural(count, noun):
     return f'{count} {noun}' if count == 1 else f'{count} {noun}s'
 
 
+def print_json(value):
+    """Emit a read's --json answer, the only thing it writes to stdout."""
+    print(json.dumps(value, indent=2))
+
+
 def human_size(num_bytes):
     if num_bytes >= 1024**3:
         return f'{num_bytes / 1024**3:.2f} GB'
@@ -877,8 +882,28 @@ def snapshot_name_width(snapshots):
     return max((len(snapshot_dir.name) for snapshot_dir, _ in snapshots), default=0)
 
 
-def show_snapshot_list(dest):
+def snapshot_summary(snapshot_dir, manifest):
+    """One snapshot as `snapshots list` reports it. A manifestless one is known by its name alone."""
+    summary = {'name': snapshot_dir.name, 'restorable': manifest is not None}
+    if manifest is None:
+        return summary | dict.fromkeys(('created', 'host', 'label', 'files', 'bytes', 'sources', 'linked_from'))
+    groups = manifest.get('groups', [])
+    return summary | {
+        'created': manifest.get('created'),
+        'host': manifest.get('hostname'),
+        'label': manifest.get('label'),
+        'files': sum(g.get('files', 0) for g in groups),
+        'bytes': sum(g.get('bytes', 0) for g in groups),
+        'sources': len(source_rows(groups)),
+        'linked_from': manifest.get('linked_from'),
+    }
+
+
+def show_snapshot_list(dest, as_json=False):
     snapshots = list_snapshots(dest)
+    if as_json:
+        print_json([snapshot_summary(snapshot_dir, manifest) for snapshot_dir, manifest in snapshots])
+        return
     if not snapshots:
         print(f'{yellow("safekeep:")} no snapshots at {cyan(str(dest))}')
         return
@@ -891,33 +916,64 @@ def show_snapshot_list(dest):
     width = snapshot_name_width(snapshots)
     for snapshot_dir, manifest in snapshots:
         name = f'{snapshot_dir.name:<{width}}'
-        if manifest is None:
+        summary = snapshot_summary(snapshot_dir, manifest)
+        if not summary['restorable']:
             print(f'  {bold(name)}  {yellow("no manifest — not restorable by safekeep")}')
             continue
-        groups = manifest.get('groups', [])
-        total_bytes = sum(g.get('bytes', 0) for g in groups)
-        total_files = sum(g.get('files', 0) for g in groups)
-        host = manifest.get('hostname', '?')
-        sources = len(source_rows(groups))
-        cells = f'{name}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {host}'
-        row = f'  {bold(name)}  {human_size(total_bytes):>9}  {total_files:>6} files  {sources:>2} sources  {cyan(host)}'
+        host = summary['host'] or '?'
+        sizes = f'{human_size(summary["bytes"]):>9}  {summary["files"]:>6} files  {summary["sources"]:>2} sources'
+        cells = f'{name}  {sizes}  {host}'
+        row = f'  {bold(name)}  {sizes}  {cyan(host)}'
         # Free text of any length, so it goes last and is clipped against the columns before it:
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
         # one of them is not at the left. On a terminal only, for the reason `status` gives --
         # a redirected run has no width to fit and loses data if one is assumed. clip measures
         # uncolored text, which is what `cells` is for.
-        if manifest.get('label'):
-            row += '  ' + green(clip_to_terminal(manifest['label'], len(cells) + 4))
+        if summary['label']:
+            row += '  ' + green(clip_to_terminal(summary['label'], len(cells) + 4))
         print(row)
 
 
-def show_snapshot_record(dest, date):
+def unreadable_snapshot(dest, date):
+    """Fail a --json read of one snapshot that is absent or has no manifest.
+
+    The fzf preview pane prints these cases on stdout and succeeds, because a pane has nowhere
+    else to show them. A caller reading JSON has to be able to tell them from an answer.
+    """
+    print(f'{red("safekeep:")} no restorable snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
+    sys.exit(1)
+
+
+def show_snapshot_record(dest, date, as_json=False):
     """What one snapshot holds, as the manifest records it — also the fzf preview pane."""
     snapshot_dir = resolve_snapshot(dest, date)
+    manifest = read_manifest(snapshot_dir) if snapshot_dir else None
+    if as_json:
+        if manifest is None:
+            unreadable_snapshot(dest, date)
+        print_json(
+            snapshot_summary(snapshot_dir, manifest)
+            | {
+                'config_name': manifest.get('config_name'),
+                'home': manifest.get('home'),
+                'sources': [
+                    {
+                        'source': row['source'],
+                        'kinds': [KIND_LABELS.get(kind, kind) for kind in row['kinds']],
+                        'tags': row['tags'],
+                        'files': row['files'],
+                        'bytes': row['bytes'],
+                    }
+                    for row in source_rows(manifest.get('groups', []))
+                ],
+                'skipped_large': manifest.get('skipped_large', []),
+                'config_warnings': manifest.get('config_warnings', []),
+            }
+        )
+        return
     if snapshot_dir is None:
         print(f'no snapshot {date} at {dest}')
         return
-    manifest = read_manifest(snapshot_dir)
     if manifest is None:
         print('no manifest — not restorable by safekeep')
         return
@@ -1060,9 +1116,21 @@ def resolve_tag_index(config, args):
     return tag_index(config, snapshot_sources(manifest)), dest, snapshot_dir
 
 
+def tag_record(name, rows, snapshot_dir):
+    """One tag as --json reports it: its sources, sized against the snapshot named beside them."""
+    return {
+        'tag': name,
+        'snapshot': snapshot_dir.name if snapshot_dir else None,
+        'sources': [row | {'note': row['note'] or None} for row in rows],
+    }
+
+
 def show_tag_list(config, config_path, args):
     """List the tags a restore can select on, and what each would bring back."""
     index, dest, snapshot_dir = resolve_tag_index(config, args)
+    if args.as_json:
+        print_json([tag_record(name, index[name], snapshot_dir) for name in sorted(index)])
+        return
 
     print(f'{bold("safekeep:")} {plural(len(index), "tag")}')
     print_tag_sources(config_path, dest, snapshot_dir)
@@ -1104,6 +1172,10 @@ def show_tag(config, config_path, args):
         if index:
             print(f'  tags: {green(", ".join(sorted(index)))}', file=sys.stderr)
         sys.exit(2)
+
+    if args.as_json:
+        print_json(tag_record(name, rows, snapshot_dir))
+        return
 
     print(f'{bold("safekeep:")} tag {green(name)} covers {bold(plural(len(rows), "source"))}')
     print_tag_sources(config_path, dest, snapshot_dir)
@@ -1203,7 +1275,7 @@ def show_files(config, args):
         rows = absent
 
     if args.as_json:
-        print(json.dumps(rows, indent=2))
+        print_json(rows)
         return
 
     if not snapshots:
@@ -1350,20 +1422,30 @@ def pick_sources(snapshot_dir, manifest, config_name):
 PREVIEW_FILE_LIMIT = 200
 
 
-def show_snapshot_source_files(dest, date, source):
+def show_snapshot_source_files(dest, date, source, as_json=False):
     """The files a snapshot holds for one source — also the fzf preview pane."""
     snapshot_dir = resolve_snapshot(dest, date)
     manifest = read_manifest(snapshot_dir) if snapshot_dir else None
     if manifest is None:
+        if as_json:
+            unreadable_snapshot(dest, date)
         print('no manifest — not restorable by safekeep')
         return
 
     row = next((row for row in source_rows(manifest.get('groups', [])) if row['source'] == source), None)
     if row is None:
+        if as_json:
+            print(f'{red("safekeep:")} {yellow(source)} is not a source in {cyan(snapshot_dir.name)}', file=sys.stderr)
+            sys.exit(1)
         print(f'{source} is not in {date}')
         return
 
     kinds = file_kinds(manifest)
+    if as_json:
+        # Every file rather than the preview's first PREVIEW_FILE_LIMIT: the cap is for a pane.
+        files = [origin for origin, is_dir in stored_paths(snapshot_dir, source) if not is_dir]
+        print_json([{'path': str(origin), 'kind': kinds.get(snapshot_rel(origin))} for origin in files])
+        return
     print(f'{kinds_label(row["kinds"])}   {plural(row["files"], "file")}   {human_size(row["bytes"])}')
     if row['tags']:
         print(f'tags: {", ".join(row["tags"])}')
@@ -2186,8 +2268,27 @@ def edit_config(config_path):
         print(f'  {yellow("config warning:")} {warning}')
 
 
-def show_config(config_path, config, warnings):
+def show_config(config_path, config, warnings, as_json=False):
     """Display the resolved config with readable formatting."""
+    if as_json:
+        repos, back_up_untracked, ignored_patterns = repo_entries(config)
+        print_json(
+            {
+                'path': str(config_path),
+                'back_up_to': config['back_up_to'],
+                'back_up_paths': [{'path': str(path), 'tags': tags} for path, tags in normalize_entries(config.get('back_up_paths', []))],
+                'git': {
+                    'repos': [{'path': str(path), 'tags': tags} for path, tags in repos],
+                    'back_up_untracked_files': back_up_untracked,
+                    'back_up_ignored_files_matching': ignored_patterns,
+                },
+                'skip_names_matching': config.get('skip_names_matching', DEFAULT_SKIP_NAMES),
+                'skip_files_over_mb': config.get('skip_files_over_mb'),
+                'warnings': warnings,
+            }
+        )
+        return
+
     print(f'{bold("safekeep:")} {cyan(str(config_path))}')
     print()
     print(f'  {bold("back up to:")} {cyan(config["back_up_to"])}')
@@ -2331,6 +2432,7 @@ def show_snapshots_help():
 
     help_section('Options')
     help_row('--source', '<path>', 'On show: the files that snapshot holds for one source')
+    help_row('--json', '', 'Output as JSON to stdout')
     help_row('-h, --help', '', 'Show this help')
     help_text(
         '  A snapshot with no manifest is listed and says so — safekeep cannot restore',
@@ -2390,6 +2492,7 @@ def show_tags_help():
 
     help_section('Options')
     help_row('--from', '<date>', 'Size against that snapshot instead of the newest')
+    help_row('--json', '', 'Output as JSON to stdout')
     help_row('-h, --help', '', 'Show this help')
     help_text(
         '  A tag lives in two places and reading either alone misleads: the config says',
@@ -2456,6 +2559,10 @@ def show_config_help():
     help_row('safekeep config init', '[name]', "Write a starter config (default: 'default')")
     help_row('safekeep config example', '', 'Print the annotated example without writing it')
 
+    help_section('Options')
+    help_row('--json', '', 'On show: output as JSON to stdout')
+    help_row('-h, --help', '', 'Show this help')
+
     help_section('Files')
     help_text(
         f'  {CONFIG_DIR}/<name>.toml',
@@ -2499,12 +2606,14 @@ def build_parser():
     snapshots_commands = snapshots.add_subparsers(dest='snapshots_command', metavar='COMMAND')
     snapshots_list = snapshots_commands.add_parser('list', add_help=False)
     snapshots_list.add_argument('-h', '--help', action='store_true', dest='show_help')
+    snapshots_list.add_argument('--json', action='store_true', dest='as_json')
     # This verb renders the fzf preview panes as well as answering a typed `snapshots show`.
     # It was two hidden preview-* commands, which is the same command with the name left off.
     snapshots_show = snapshots_commands.add_parser('show', add_help=False)
     snapshots_show.add_argument('-h', '--help', action='store_true', dest='show_help')
     snapshots_show.add_argument('date', nargs='?', metavar='DATE')
     snapshots_show.add_argument('--source', metavar='PATH')
+    snapshots_show.add_argument('--json', action='store_true', dest='as_json')
 
     files = commands.add_parser('files', add_help=False)
     files.add_argument('-h', '--help', action='store_true', dest='show_help')
@@ -2521,10 +2630,12 @@ def build_parser():
     tags_list = tags_commands.add_parser('list', add_help=False)
     tags_list.add_argument('-h', '--help', action='store_true', dest='show_help')
     tags_list.add_argument('--from', dest='from_date', metavar='DATE')
+    tags_list.add_argument('--json', action='store_true', dest='as_json')
     tags_show = tags_commands.add_parser('show', add_help=False)
     tags_show.add_argument('-h', '--help', action='store_true', dest='show_help')
     tags_show.add_argument('name', nargs='?', metavar='NAME')
     tags_show.add_argument('--from', dest='from_date', metavar='DATE')
+    tags_show.add_argument('--json', action='store_true', dest='as_json')
 
     restore = commands.add_parser('restore', add_help=False)
     restore.add_argument('-h', '--help', action='store_true', dest='show_help')
@@ -2549,6 +2660,7 @@ def build_parser():
     config_commands = config.add_subparsers(dest='config_command', metavar='COMMAND')
     config_show = config_commands.add_parser('show', add_help=False)
     config_show.add_argument('-h', '--help', action='store_true', dest='show_help')
+    config_show.add_argument('--json', action='store_true', dest='as_json')
     config_init = config_commands.add_parser('init', add_help=False)
     config_init.add_argument('-h', '--help', action='store_true', dest='show_help')
     config_init.add_argument('name', nargs='?', default='default')
@@ -2696,15 +2808,15 @@ def main():
     config, warnings = load_config(config_path)
 
     if args.command == 'config':
-        show_config(config_path, config, warnings)
+        show_config(config_path, config, warnings, args.as_json)
     elif args.command == 'snapshots':
         dest = Path(config['back_up_to']).expanduser()
         if args.snapshots_command == 'list':
-            show_snapshot_list(dest)
+            show_snapshot_list(dest, args.as_json)
         elif args.source:
-            show_snapshot_source_files(dest, args.date, args.source)
+            show_snapshot_source_files(dest, args.date, args.source, args.as_json)
         else:
-            show_snapshot_record(dest, args.date)
+            show_snapshot_record(dest, args.date, args.as_json)
     elif args.command == 'files':
         show_files(config, args)
     elif args.command == 'tags':

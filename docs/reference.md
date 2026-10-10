@@ -385,6 +385,11 @@ If the snapshot's home differs from the restoring machine's, paths under it are 
 
 **Fail fast**: If the destination doesn't exist or isn't writable, exit immediately.
 
+**Every read takes `--json`**: `snapshots list`, `snapshots show`, `files list`, `tags list`,
+`tags show` and `config show` print JSON to stdout, and a listing with no rows prints `[]`. Without
+`--json`, `snapshots show` on an absent snapshot prints the reason and succeeds, because it is also
+the fzf preview pane. With `--json` it exits 1 instead, so a caller can tell an answer from a miss.
+
 **Smart exclusions**: Default `skip_names_matching` list (`.venv`, `node_modules`, caches) applied to all rsync calls. Override in config.
 
 **Sized from the source**: Totals come from the walk that builds the manifest, not from re-reading the destination, so the backup never stats the whole snapshot back over the network.
