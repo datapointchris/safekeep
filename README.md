@@ -82,7 +82,7 @@ task fix        # ruff format and autofix
 Releases are cut by python-semantic-release from conventional commits on `main`. Nothing is tagged
 by hand.
 
-The terminal style — palette, section header, help grammar — comes from
-[pytermstyle](https://github.com/datapointchris/pytermstyle), so safekeep's screens are
-indistinguishable from the bash and Go CLIs beside it on `PATH`. Everything else is stdlib: the
-config is read with `tomllib` and the copying is `rsync`.
+[Typer](https://typer.tiangolo.com) owns the command tree and renders the help.
+[pytermstyle](https://github.com/datapointchris/pytermstyle) colors the command output and clips
+its rows to the terminal, so a run reads like the bash and Go CLIs beside it on `PATH`. The config
+is read with stdlib `tomllib`, and the copying is `rsync`.

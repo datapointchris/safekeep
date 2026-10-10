@@ -23,9 +23,10 @@ from pathlib import Path
 
 import pytest
 import tomli_w
-from pyselfupdate import Result
+from typer.testing import CliRunner
 
 import safekeep
+import safekeep.main
 
 
 def write_config(tmp_path, dest, **extra):
@@ -132,11 +133,11 @@ def test_help_lists_every_public_command(tmp_path):
 
 
 def test_restore_help_works_without_the_option_it_documents(tmp_path):
-    """--to cannot be argparse-required, or asking how to use restore fails on the very
-    argument the answer explains. See the --to argument in build_parser."""
+    """--to is required, and `--help` still answers, because help is read before requirements are checked."""
     result = run_safekeep('restore', '--help')
     assert result.returncode == 0
     assert '--to' in result.stdout
+    assert 'restore-test' in result.stdout, 'the help for --to points at rehearsing, not just at the flag'
     for selection in ('--all', '--source', '--tag'):
         assert selection in result.stdout
 
@@ -144,8 +145,8 @@ def test_restore_help_works_without_the_option_it_documents(tmp_path):
 def test_restore_without_a_target_says_which_option_is_missing(tmp_path):
     result = run_safekeep('restore', '--all')
     assert result.returncode == 2
-    assert '--to' in result.stderr
-    assert 'restore-test' in result.stderr, 'the error points at rehearsing, not just at the flag'
+    assert "Missing option '--to'" in result.stderr
+    assert 'safekeep restore -h' in result.stderr, 'the error names the screen that explains --to'
 
 
 def test_backup_help_documents_narrowing_a_run(tmp_path):
@@ -233,20 +234,14 @@ def test_a_namespace_screen_names_its_verbs(tmp_path):
 
 
 def test_a_verb_missing_its_argument_says_which_one(tmp_path, source_tree):
-    """Both positionals are optional in the parser so `--help` reaches its screen; the error
-    that replaces argparse's names the argument and where to find its values."""
+    """The error names the argument, and the screen it points at says where its values come from."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    for verb, wanted in (('snapshots', 'snapshots list'), ('tags', 'tags list')):
-        result = run_safekeep('--config', str(config_path), verb, 'show')
+    for namespace, argument in (('snapshots', 'DATE'), ('tags', 'NAME')):
+        result = run_safekeep('--config', str(config_path), namespace, 'show')
         assert result.returncode == 2
-        assert wanted in result.stderr
-
-
-def test_a_verbs_help_is_its_namespaces_screen(tmp_path):
-    """One screen per namespace, so `backup --help` and `backup run --help` reach the same page
-    rather than a drill-down you read to learn there was nothing on it."""
-    assert run_safekeep('backup', 'run', '--help').stdout == run_safekeep('backup', '--help').stdout
+        assert f"Missing argument '{argument}'" in result.stderr
+        assert f'safekeep {namespace} show -h' in result.stderr
 
 
 # --- config loading -------------------------------------------------------------------
@@ -2260,21 +2255,10 @@ def test_version_is_read_from_the_installed_metadata():
     assert 'safekeep' not in safekeep.tool_version()
 
 
-def test_update_is_a_command_rather_than_a_usage_error():
-    """Parsed here rather than run, because running it reaches the network. That the
-    verb resolves at all is what a typo in the parser would break."""
-    args = safekeep.build_parser().parse_args(['update'])
-    assert args.command == 'update'
-
-
-def test_an_applied_update_names_a_missing_lock_and_ends_through_exit_now(monkeypatch, capsys):
-    exits = []
-    monkeypatch.setattr(safekeep, 'update', lambda config: Result(current='v1.0.0', latest='v2.0.0', applied=True, lock_missing=True))
-    monkeypatch.setattr(safekeep, 'exit_now', lambda: exits.append(0) or sys.exit(0))
-    monkeypatch.setattr(sys, 'argv', ['safekeep', 'update'])
-
-    with pytest.raises(SystemExit):
-        safekeep.main()
-
-    assert exits == [0]
-    assert 'v2.0.0 has no uv.lock' in capsys.readouterr().err
+def test_update_hands_its_flags_to_the_shared_updater(monkeypatch):
+    """The updater itself is pyselfupdate's and reaches the network, so it is replaced here."""
+    calls = []
+    monkeypatch.setattr(safekeep.main, 'run_update', lambda config, **flags: calls.append((config.tool, flags)))
+    result = CliRunner().invoke(safekeep.main.app, ['update', '--check', '--no-changelog'])
+    assert result.exit_code == 0, result.output
+    assert calls == [('safekeep', {'check_only': True, 'skip_changelog': True})]
