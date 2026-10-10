@@ -87,10 +87,19 @@ DEFAULT_SKIP_NAMES = [
     '.terraform',
 ]
 
-CONFIG_DIR = Path.home() / '.config' / 'safekeep'
 
-# Where every command the tool prints for a reader to rehearse a restore aims it.
-REHEARSAL_ROOT = '/tmp/restore-test'
+def xdg_home(variable, fallback):
+    """An XDG base directory: the variable when it holds an absolute path, else its default under home."""
+    value = os.environ.get(variable, '')
+    return Path(value) if os.path.isabs(value) else Path.home() / fallback
+
+
+CONFIG_DIR = xdg_home('XDG_CONFIG_HOME', '.config') / 'safekeep'
+
+# Where every command the tool prints for a reader to rehearse a restore aims it. A cache, because
+# deleting it costs nothing, and the user's own, where a fixed path under /tmp is shared with
+# every account on the machine.
+REHEARSAL_ROOT = xdg_home('XDG_CACHE_HOME', '.cache') / 'safekeep' / 'rehearsal'
 
 # How many snapshot names an error lists before it hands over to `snapshots list`.
 SNAPSHOT_CHOICES_SHOWN = 5
@@ -312,39 +321,98 @@ def warn_about_json_configs():
         print(f'    {path.name} -> {path.stem}.toml', file=sys.stderr)
 
 
-def resolve_config(name):
-    """Resolve config by name, absolute path, or auto-detect single config."""
-    if name:
-        path = Path(name)
-        if path.is_absolute() and path.exists():
+def names_a_path(name):
+    """Whether a config was named by a file rather than by name: a directory part, a ~, or a .toml suffix."""
+    return os.sep in name or name.startswith('~') or name.endswith('.toml')
+
+
+def config_names():
+    return sorted(path.stem for path in CONFIG_DIR.glob('*.toml')) if CONFIG_DIR.exists() else []
+
+
+def print_first_config_route():
+    """How to get a first config, including the case of a machine that has only the backup drive."""
+    print(f'  write one: {cyan("safekeep config init")}', file=sys.stderr)
+    print('  to read an existing backup drive, set its back_up_to to the directory holding the snapshots.', file=sys.stderr)
+    print('  a restore needs nothing else from the config', file=sys.stderr)
+
+
+def holds_snapshots(directory):
+    try:
+        return any(child.is_dir() and SNAPSHOT_NAME.fullmatch(child.name) for child in directory.iterdir())
+    except OSError:
+        return False
+
+
+def retyped_with_config(typed, name):
+    """The command line as typed, with `-c name` first in place of any -c it had."""
+    typed = list(typed)
+    root, at = [], 0
+    while at < len(typed) and typed[at].startswith('-'):
+        word = typed[at]
+        if word in ('-c', '--config'):
+            at += 2
+            continue
+        if not (word.startswith('--config=') or (word.startswith('-c') and not word.startswith('--'))):
+            root.append(word)
+        at += 1
+    return shlex.join(['safekeep', '-c', name, *root, *typed[at:]])
+
+
+def resolve_config(name, typed=()):
+    """The config file a command reads: named, at a path, or the only one there is.
+
+    `typed` is the command line as given, so an error can print it back with the -c that works.
+    """
+    if name and names_a_path(name):
+        # Absolute, so every command printed for this config runs from any directory.
+        path = Path(name).expanduser().absolute()
+        if path.is_dir():
+            print(f'{red("safekeep:")} {yellow(str(path))} is a directory, and -c takes a config name or a .toml file', file=sys.stderr)
+            if holds_snapshots(path):
+                print('  it holds snapshots. To read them, write a config whose back_up_to is this directory:', file=sys.stderr)
+                print(f'    {cyan("safekeep config init drive")}', file=sys.stderr)
+                print(f'    {cyan("safekeep -c drive config edit")}', file=sys.stderr)
+                print('  a restore needs nothing else from the config', file=sys.stderr)
+            sys.exit(2)
+        if path.is_file():
             return path
+        print(f'{red("safekeep:")} no config file at {yellow(str(path))}', file=sys.stderr)
+        # A bare file name usually means the config of that name, which -c takes without the suffix.
+        if os.sep not in name and (CONFIG_DIR / Path(name).name).is_file():
+            print(
+                f'  the config named {green(Path(name).stem)} is that file, by name: {cyan(retyped_with_config(typed, Path(name).stem))}',
+                file=sys.stderr,
+            )
+        elif path.parent.is_dir():
+            print(f'  write one there: {cyan(f"safekeep config init {shell_path(str(path))}")}', file=sys.stderr)
+        else:
+            print(f'  and no directory {yellow(str(path.parent))} to write one in', file=sys.stderr)
+        sys.exit(1)
+
+    if name:
         config_path = CONFIG_DIR / f'{name}.toml'
         if config_path.exists():
             return config_path
-        print(f'{red("safekeep:")} config not found: {yellow(name)}', file=sys.stderr)
-        print(f'  looked in: {cyan(str(config_path))}', file=sys.stderr)
+        print(f'{red("safekeep:")} no config named {yellow(name)} in {cyan(str(CONFIG_DIR))}', file=sys.stderr)
+        known = config_names()
+        print(f'  configs: {green(", ".join(known)) if known else yellow("none")}', file=sys.stderr)
         warn_about_json_configs()
-        print(f'  generate it: {cyan(f"safekeep config init {name}")}', file=sys.stderr)
+        print(f'  write a new one: {cyan(f"safekeep config init {shlex.quote(name)}")}', file=sys.stderr)
         sys.exit(1)
 
-    if not CONFIG_DIR.exists():
-        print(f'{red("safekeep:")} no config directory at {cyan(str(CONFIG_DIR))}', file=sys.stderr)
-        print(f'  generate a starter config: {cyan("safekeep config init")}', file=sys.stderr)
-        sys.exit(1)
-
-    configs = sorted(CONFIG_DIR.glob('*.toml'))
+    configs = config_names()
     if not configs:
-        print(f'{red("safekeep:")} no configs found in {cyan(str(CONFIG_DIR))}', file=sys.stderr)
+        print(f'{red("safekeep:")} no configs in {cyan(str(CONFIG_DIR))}', file=sys.stderr)
         warn_about_json_configs()
-        print(f'  generate a starter config: {cyan("safekeep config init")}', file=sys.stderr)
+        print_first_config_route()
         sys.exit(1)
     if len(configs) == 1:
-        return configs[0]
+        return CONFIG_DIR / f'{configs[0]}.toml'
 
-    print(f'{yellow("safekeep:")} multiple configs found, specify one with {cyan("--config")}:', file=sys.stderr)
-    for c in configs:
-        print(f'  {green(c.stem)}', file=sys.stderr)
-    sys.exit(1)
+    print(f'{red("safekeep:")} {len(configs)} configs, so name one before the command: {green(", ".join(configs))}', file=sys.stderr)
+    print(f'  {cyan(retyped_with_config(typed, configs[0]))}', file=sys.stderr)
+    sys.exit(2)
 
 
 def load_config(config_path):
@@ -416,7 +484,10 @@ def normalize_entries(entries):
     normalized = []
     for entry in entries:
         if not isinstance(entry, dict) or 'path' not in entry:
-            print(f'{red("safekeep:")} every entry needs a "path" key: {yellow(repr(entry))}', file=sys.stderr)
+            print(
+                f'{red("safekeep:")} every [[back_up_paths]] and [[git.repos]] table needs a "path" key: {yellow(repr(entry))}',
+                file=sys.stderr,
+            )
             sys.exit(1)
         tags = entry.get('tags', [])
         # Fatal rather than coerced: a bare tags = "wsl" is a list of characters to Python, so
@@ -668,19 +739,19 @@ def link_dest_flags(link_dest):
 
 
 def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None, link_dest=None):
-    """Rsync absolute paths into dest_base, preserving full directory structure.
+    """Rsync absolute paths into dest_base, preserving full directory structure; returns the files copied.
 
     Uses rsync --relative with absolute paths so that '/home/chris/.ssh/config'
     becomes dest_base/home/chris/.ssh/config.
     """
     valid = [str(p) for p in paths if p.exists()]
     if not valid:
-        return
+        return 0
 
     if not dry_run:
         dest_base.mkdir(parents=True, exist_ok=True)
 
-    cmd = ['rsync', '-av', '--no-perms', '--chmod=Du+w', '--relative', '--copy-links']
+    cmd = ['rsync', '-a', '--no-perms', '--chmod=Du+w', '--relative', '--copy-links', *rsync_naming_flags()]
     cmd.extend(link_dest_flags(link_dest))
     for pattern in excludes:
         cmd.extend(['--exclude', pattern])
@@ -691,18 +762,18 @@ def rsync_paths(paths, dest_base, excludes, dry_run=False, max_size_mb=None, lin
     cmd.extend(valid)
     cmd.append(str(dest_base) + '/')
 
-    run_rsync(cmd)
+    return run_backup_rsync(cmd)
 
 
 def rsync_untracked(files, dest_base, dry_run=False, link_dest=None):
-    """Rsync individual untracked files preserving full path structure.
+    """Rsync individual untracked files preserving full path structure; returns the files copied.
 
     Uses --files-from with / as the base for efficiency when copying many
     small files. Paths are stored relative to filesystem root in the destination.
     """
     rel_paths = [snapshot_rel(f) for f in files]
     if not rel_paths:
-        return
+        return 0
 
     if not dry_run:
         dest_base.mkdir(parents=True, exist_ok=True)
@@ -712,13 +783,40 @@ def rsync_untracked(files, dest_base, dry_run=False, link_dest=None):
         tmp_path = tmp.name
 
     try:
-        cmd = ['rsync', '-av', '--no-perms', '--files-from', tmp_path, '/', str(dest_base) + '/']
+        cmd = ['rsync', '-a', '--no-perms', *rsync_naming_flags(), '--files-from', tmp_path, '/', str(dest_base) + '/']
         cmd.extend(link_dest_flags(link_dest))
         if dry_run:
             cmd.append('-n')
-        run_rsync(cmd)
+        return run_backup_rsync(cmd)
     finally:
         os.unlink(tmp_path)
+
+
+def copy_tally(dry_run, copied, origin):
+    """One backup section's last line: the files rsync named as it copied them."""
+    verb = yellow('would copy') if dry_run else green('copied')
+    return f'{verb} {bold(plural(copied, "file"))} from {origin}'
+
+
+def link_verdict(linked_from):
+    """Where a snapshot's unchanged files went, read from inodes, in the words every command uses."""
+    return f'hard links into {linked_from}' if linked_from else 'copied in full, linked to no earlier snapshot'
+
+
+def run_backup_rsync(cmd):
+    """Run one backup rsync, naming each file it copies by the path it came from, and count them.
+
+    rsync names only what it writes, so a file unchanged since the previous snapshot is a hard
+    link and goes unnamed and uncounted.
+    """
+    copied = []
+
+    def report(name):
+        copied.append(name)
+        print(f'    {tilde("/" + name.lstrip("/"))}', flush=True)
+
+    run_rsync_naming_files(cmd, report)
+    return len(copied)
 
 
 @cache
@@ -799,10 +897,6 @@ def check_rsync(cmd, returncode):
         sys.exit(1)
 
 
-def run_rsync(cmd):
-    check_rsync(cmd, subprocess.run(cmd).returncode)
-
-
 def run_rsync_naming_files(cmd, report):
     """Run rsync, handing `report` each path as rsync writes it."""
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
@@ -846,16 +940,29 @@ def resolve_snapshot(dest, wanted):
     return exact[0] if exact else next((d for d in snapshots if d.name.startswith(wanted)), None)
 
 
-def snapshot_choices(dest):
+def snapshot_choices(dest, config_path):
     """The snapshots an error asking for one can offer, newest first, as plain text lines."""
     names = [snapshot_dir.name for snapshot_dir, _ in list_snapshots(dest)]
+    command = safekeep_for(config_path)
     if not names:
-        return f'No snapshots at {dest} yet. Take one: safekeep backup run'
+        return f'No snapshots at {dest} yet. Take one: {command} backup run'
     lines = [f'  {name}' + ('  (newest)' if position == 0 else '') for position, name in enumerate(names[:SNAPSHOT_CHOICES_SHOWN])]
     hidden = len(names) - SNAPSHOT_CHOICES_SHOWN
     if hidden > 0:
-        lines.append(f'  and {hidden} more: safekeep snapshots list')
+        lines.append(f'  and {hidden} more: {command} snapshots list')
     return 'Snapshots:\n' + '\n'.join(lines)
+
+
+def unreadable_reason(dest, wanted, snapshot_dir, config_path):
+    """Why one snapshot cannot be read: absent, with the ones there are, or present without a manifest."""
+    if snapshot_dir is None:
+        return f'no snapshot {wanted} at {dest}\n{snapshot_choices(dest, config_path)}'
+    return f'snapshot {snapshot_dir.name} has no manifest, so safekeep can neither read nor restore it'
+
+
+def fail_unreadable(dest, wanted, snapshot_dir, config_path):
+    print(f'{red("safekeep:")} {unreadable_reason(dest, wanted, snapshot_dir, config_path)}', file=sys.stderr)
+    sys.exit(1)
 
 
 def previous_snapshot(dest, snapshot_name):
@@ -940,16 +1047,22 @@ def snapshot_summary(snapshot_dir, manifest):
     }
 
 
-def show_snapshot_list(dest, as_json=False):
+def counted(count, noun, width):
+    """A count right-aligned to `width` and its noun padded to its plural, so a column of them lines up."""
+    return f'{count:>{width}} {noun if count == 1 else noun + "s":<{len(noun) + 1}}'
+
+
+def show_snapshot_list(dest, config_path, as_json=False):
     snapshots = list_snapshots(dest)
     if as_json:
         print_json([snapshot_summary(snapshot_dir, manifest) for snapshot_dir, manifest in snapshots])
         return
     if not snapshots:
         print(f'{yellow("safekeep:")} no snapshots at {cyan(str(dest))}')
+        print(f'  take one: {cyan(f"{safekeep_for(config_path)} backup run")}')
         return
 
-    print(f'{bold("safekeep:")} {len(snapshots)} snapshots at {cyan(str(dest))}')
+    print(f'{bold("safekeep:")} {plural(len(snapshots), "snapshot")} at {cyan(str(dest))}')
     print()
     # Padded across the listing rather than to a constant: a destination holds names of both
     # shapes, since every snapshot taken before the time was added is a bare date. A shorter
@@ -959,39 +1072,31 @@ def show_snapshot_list(dest, as_json=False):
         name = f'{snapshot_dir.name:<{width}}'
         summary = snapshot_summary(snapshot_dir, manifest)
         if not summary['restorable']:
-            print(f'  {bold(name)}  {yellow("no manifest — not restorable by safekeep")}')
+            print(f'  {bold(name)}  {yellow("no manifest, so safekeep can neither read nor restore it")}')
             continue
         host = summary['host'] or '?'
-        sizes = f'{human_size(summary["bytes"]):>9}  {summary["files"]:>6} files  {summary["source_count"]:>2} sources'
+        sizes = (
+            f'{human_size(summary["bytes"]):>9}  {counted(summary["files"], "file", 6)}  {counted(summary["source_count"], "source", 2)}'
+        )
         cells = f'{name}  {sizes}  {host}'
         row = f'  {bold(name)}  {sizes}  {cyan(host)}'
         # Free text of any length, so it goes last and is clipped against the columns before it:
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
-        # one of them is not at the left. On a terminal only, for the reason `status` gives --
-        # a redirected run has no width to fit and loses data if one is assumed. clip measures
+        # one of them is not at the left. On a terminal only, because a redirected run has no
+        # width to fit and loses data if one is assumed. clip measures
         # uncolored text, which is what `cells` is for.
         if summary['label']:
             row += '  ' + green(clip_to_terminal(summary['label'], len(cells) + 4))
         print(row)
 
 
-def unreadable_snapshot(dest, date):
-    """Fail a --json read of one snapshot that is absent or has no manifest.
-
-    The fzf preview pane prints these cases on stdout and succeeds, because a pane has nowhere
-    else to show them. A caller reading JSON has to be able to tell them from an answer.
-    """
-    print(f'{red("safekeep:")} no restorable snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
-    sys.exit(1)
-
-
-def show_snapshot_record(dest, date, as_json=False):
+def show_snapshot_record(dest, date, config_path, as_json=False):
     """What one snapshot holds, as the manifest records it — also the fzf preview pane."""
     snapshot_dir = resolve_snapshot(dest, date)
     manifest = read_manifest(snapshot_dir) if snapshot_dir else None
+    if manifest is None:
+        fail_unreadable(dest, date, snapshot_dir, config_path)
     if as_json:
-        if manifest is None:
-            unreadable_snapshot(dest, date)
         home_then = manifest.get('home')
         home_now = str(Path.home())
         print_json(
@@ -1015,20 +1120,13 @@ def show_snapshot_record(dest, date, as_json=False):
             }
         )
         return
-    if snapshot_dir is None:
-        print(f'no snapshot {date} at {dest}')
-        return
-    if manifest is None:
-        print('no manifest — not restorable by safekeep')
-        return
     print(f'{snapshot_dir.name}   {manifest.get("hostname", "?")}   {manifest.get("created", "?")}')
     print(f'config: {manifest.get("config_name", "?")}   home: {manifest.get("home", "?")}')
     if manifest.get('label'):
         print(f'label: {manifest["label"]}')
     # Named because it is what says whether this destination can hard-link at all. A run of
-    # snapshots all reading "full copy" means every one of them costs its full size.
-    linked = manifest.get('linked_from')
-    print(f'storage: {f"shares inodes with {linked}" if linked else "full copy"}')
+    # snapshots all copied in full means every one of them costs its full size.
+    print(f'unchanged files: {link_verdict(manifest.get("linked_from"))}')
     print()
     for row in source_rows(manifest.get('groups', [])):
         tags = ' '.join(row['tags'])
@@ -1052,7 +1150,7 @@ def config_entries(config):
     return entries + [('git repo', path, tags) for path, tags in repos]
 
 
-def snapshot_to_size_against(dest, date):
+def snapshot_to_size_against(dest, date, config_path):
     """The snapshot a tag listing reports against: the one named, or the newest restorable one."""
     snapshots = [(d, m) for d, m in list_snapshots(dest) if m is not None]
     if date is None:
@@ -1061,8 +1159,7 @@ def snapshot_to_size_against(dest, date):
     for snapshot_dir, manifest in snapshots:
         if snapshot_dir == named:
             return snapshot_dir, manifest
-    print(f'{red("safekeep:")} no restorable snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
-    sys.exit(1)
+    fail_unreadable(dest, date, named, config_path)
 
 
 def snapshot_sources(manifest):
@@ -1088,13 +1185,19 @@ def snapshot_sources(manifest):
     return sources
 
 
+NOT_IN_CONFIG = 'not in the config'
+TAGGED_IN_SNAPSHOT_ONLY = 'tagged in the snapshot only'
+TAGGED_IN_CONFIG_ONLY = 'tagged in the config only'
+
+
 def tag_index(config, sources):
     """{tag: [row]} over the config and a snapshot together.
 
-    Either side alone hides one of the two ways a tagged restore comes back empty: a tag added
-    since the snapshot was taken selects nothing in it, and a tag renamed in the config is still
-    the only name the snapshots taken before the rename answer to. A row's 'files' is None when
-    the source is not in the snapshot at all, which is the first case.
+    Either side alone hides one of the ways a tagged restore comes back empty: a tag added since
+    the snapshot was taken selects nothing in it, and a tag renamed in the config is still the
+    only name the snapshots taken before the rename answer to. A row's 'files' is None when the
+    source is not in the snapshot at all. A source the snapshot holds without the tag is noted
+    TAGGED_IN_CONFIG_ONLY, since a restore selects on the snapshot's tags and skips it.
     """
     index = {}
     entries = {str(path): (kind, tags) for kind, path, tags in config_entries(config)}
@@ -1104,9 +1207,11 @@ def tag_index(config, sources):
         stored = sources.get(source)
         for tag in dict.fromkeys(config_tags + (stored['tags'] if stored else [])):
             if source not in entries:
-                note = 'not in the config'
+                note = NOT_IN_CONFIG
             elif tag not in config_tags:
-                note = 'tagged in the snapshot only'
+                note = TAGGED_IN_SNAPSHOT_ONLY
+            elif stored and tag not in stored['tags']:
+                note = TAGGED_IN_CONFIG_ONLY
             else:
                 note = ''
             index.setdefault(tag, []).append(
@@ -1121,9 +1226,14 @@ def tag_index(config, sources):
     return index
 
 
+def selected_by_tag(row):
+    """Whether `restore --tag` brings this row back: the snapshot holds the source and tags it."""
+    return row['files'] is not None and row['note'] != TAGGED_IN_CONFIG_ONLY
+
+
 def sized_total(rows):
-    """The files and bytes rows account for in the snapshot, ignoring those not in it."""
-    sized = [row for row in rows if row['files'] is not None]
+    """The files and bytes a restore by the tag brings back, from the rows it selects."""
+    sized = [row for row in rows if selected_by_tag(row)]
     if not sized:
         return None
     return size_cell(sum(row['files'] for row in sized), sum(row['bytes'] for row in sized))
@@ -1143,20 +1253,21 @@ def tilde(source):
 
 def print_tag_sources(config_path, dest, snapshot_dir):
     """Name the two sides a tag listing is read from, since a tag can be on either alone."""
+    config = f'config {cyan(config_handle(config_path))}'
     if snapshot_dir is None:
-        print(f'  in {cyan(config_path.name)} — {yellow("no snapshots")} at {cyan(str(dest))} to restore by tag yet')
+        print(f'  from {config}. No snapshots at {cyan(str(dest))} yet, so a restore by tag has nothing to read')
     else:
-        print(f'  in {cyan(config_path.name)}, sized against snapshot {cyan(snapshot_dir.name)}')
+        print(f"  from {config} and snapshot {cyan(snapshot_dir.name)}. A restore by tag reads the snapshot's tags")
 
 
-def resolve_tag_index(config, from_date: str | None):
+def resolve_tag_index(config, config_path, from_date: str | None):
     """The tag index, and the two things a listing has to name beside it.
 
     Both verbs read the config and one snapshot together, and both report which snapshot they
     sized against — so the resolution is here rather than duplicated in each.
     """
     dest = Path(config['back_up_to']).expanduser()
-    snapshot_dir, manifest = snapshot_to_size_against(dest, from_date)
+    snapshot_dir, manifest = snapshot_to_size_against(dest, from_date, config_path)
     return tag_index(config, snapshot_sources(manifest)), dest, snapshot_dir
 
 
@@ -1171,7 +1282,7 @@ def tag_record(name, rows, snapshot_dir):
 
 def show_tag_list(config, config_path, from_date: str | None, as_json: bool):
     """List the tags a restore can select on, and what each would bring back."""
-    index, dest, snapshot_dir = resolve_tag_index(config, from_date)
+    index, dest, snapshot_dir = resolve_tag_index(config, config_path, from_date)
     if as_json:
         print_json([tag_record(name, index[name], snapshot_dir) for name in sorted(index)])
         return
@@ -1180,38 +1291,42 @@ def show_tag_list(config, config_path, from_date: str | None, as_json: bool):
     print_tag_sources(config_path, dest, snapshot_dir)
 
     if not index:
-        print(f'\n  Tag the entries and a restore can select them: {cyan("safekeep config edit")}')
+        print(f'\n  tag the sources and a restore can select them: {cyan(f"{safekeep_for(config_path)} config edit")}')
         return
 
     print()
     width = max(len(tag) for tag in index)
     for tag in sorted(index):
         rows = index[tag]
-        # A tag half of whose sources are missing still shows a size, and the size is the part
-        # that reads as reassuring -- so the shortfall is named on the same row rather than left
-        # to be noticed by drilling in. With no snapshot at all the header has said so already.
-        missing = [row for row in rows if row['files'] is None]
+        # A tag that skips some of its sources still shows a size, and the size is the part that
+        # reads as reassuring -- so the shortfall is named on the same row rather than left to be
+        # noticed by drilling in. With no snapshot at all the header has said so already.
+        skipped = len([row for row in rows if not selected_by_tag(row)])
         if snapshot_dir is None:
             sizes = ''
-        elif len(missing) == len(rows):
-            sizes = yellow('not in this snapshot')
+        elif skipped == len(rows):
+            sizes = yellow('restores nothing from this snapshot')
         else:
-            shortfall = f'  {yellow(f"{len(missing)} not in this snapshot")}' if missing else ''
+            shortfall = f'  {yellow("skips " + plural(skipped, "source"))}' if skipped else ''
             sizes = f'{sized_total(rows)}{shortfall}'
         print(f'  {green(f"{tag:<{width}}")}  {plural(len(rows), "source"):<12}{sizes}'.rstrip())
 
-    untagged = [path for _, path, tags in config_entries(config) if not tags]
+    # Counted in the snapshot, because its tags are the ones a restore selects on.
+    held = snapshot_sources(read_manifest(snapshot_dir)) if snapshot_dir else {}
+    untagged = [source for source, stored in held.items() if not stored['tags']]
     if untagged:
-        print(f'\n  untagged: {plural(len(untagged), "source")} — only {cyan("--all")} or {cyan("--source")} reaches them')
-    print(f'\n  {cyan(f"safekeep tags show {sorted(index)[0]}")}  what one tag covers')
+        reach = f'only {cyan("--all")} or {cyan("--source")} restores them'
+        print(f'\n  untagged in this snapshot: {plural(len(untagged), "source")}, so {reach}')
+    print(f'\n  what one tag covers: {cyan(f"{safekeep_for(config_path)} tags show {shlex.quote(sorted(index)[0])}")}')
 
 
 def show_tag(config, config_path, name: str, from_date: str | None, as_json: bool):
     """Show the sources one tag covers, and the restore that would bring them back."""
-    index, dest, snapshot_dir = resolve_tag_index(config, from_date)
+    index, dest, snapshot_dir = resolve_tag_index(config, config_path, from_date)
     rows = index.get(name)
     if not rows:
-        print(f'{red("safekeep:")} no tag {yellow(name)} in {cyan(config_path.name)}', file=sys.stderr)
+        snapshot = f' or snapshot {cyan(snapshot_dir.name)}' if snapshot_dir else ''
+        print(f'{red("safekeep:")} no tag {yellow(name)} in config {cyan(config_handle(config_path))}{snapshot}', file=sys.stderr)
         if index:
             print(f'  tags: {green(", ".join(sorted(index)))}', file=sys.stderr)
         sys.exit(2)
@@ -1228,24 +1343,53 @@ def show_tag(config, config_path, name: str, from_date: str | None, as_json: boo
     for row in rows:
         if snapshot_dir is None:
             sizes = ''
+        elif row['files'] is None:
+            sizes = yellow('absent from this snapshot')
         else:
-            sizes = size_cell(row['files'], row['bytes']) if row['files'] is not None else yellow('not in this snapshot')
+            sizes = size_cell(row['files'], row['bytes'])
         note = f'  {yellow(row["note"])}' if row['note'] else ''
         print(f'  {row["kind"]:<9} {tilde(row["source"]):<{width}}  {sizes}{note}'.rstrip())
 
+    selected = [row for row in rows if selected_by_tag(row)]
     # A total under a single row is the same number twice.
-    if len([row for row in rows if row['files'] is not None]) > 1:
+    if len(selected) > 1:
         print(f'  {"":<9} {"":<{width}}  {bold(sized_total(rows))}')
+    if snapshot_dir is None:
+        return
 
-    from_flag = f' --from {from_date}' if from_date else ''
-    print(f'\n  restore it: {cyan(f"safekeep restore --to {REHEARSAL_ROOT}{from_flag} --tag {name}")}')
+    # Pinned with --from, so the command restores the snapshot sized here even after a newer run.
+    by_tag = rehearsal_request(tags=[name])
+    if selected:
+        print(f'\n  restore it: {cyan(restore_command(by_tag, config_path, from_snapshot=snapshot_dir.name))}')
+        return
+    # A run narrowed by --tag or --source leaves this snapshot without sources an older one tags.
+    other = newest_snapshot_selecting(dest, by_tag, besides=snapshot_dir.name)
+    if other:
+        from_other = restore_command(by_tag, config_path, from_snapshot=other)
+        instead = f'restore by the tag from the newest snapshot that carries it: {cyan(from_other)}'
+    else:
+        instead = f'take a snapshot that tags them: {cyan(f"{safekeep_for(config_path)} backup run")}'
+    held = [row for row in rows if row['files'] is not None]
+    if not held:
+        print(f'\n  none of its sources are in {cyan(snapshot_dir.name)}')
+        by_path = rehearsal_request(sources=[row['source'] for row in rows])
+        holding = None if other else newest_snapshot_selecting(dest, by_path, besides=snapshot_dir.name)
+        if holding:
+            from_holding = restore_command(by_path, config_path, from_snapshot=holding)
+            instead = f'restore them by path from the newest snapshot that holds them, untagged: {cyan(from_holding)}'
+        print(f'  {instead}')
+        return
+    by_path = rehearsal_request(sources=[row['source'] for row in held])
+    print(f'\n  {cyan(snapshot_dir.name)} holds these sources without the tag, so a restore by {green(name)} selects nothing in it.')
+    print(f'  restore them by path: {cyan(restore_command(by_path, config_path, from_snapshot=snapshot_dir.name))}')
+    print(f'  or {instead}')
 
 
-def restorable_snapshots(dest, date):
+def restorable_snapshots(dest, date, config_path):
     """Every snapshot with a manifest, newest first, or only the one `date` names."""
     if date is None:
         return [(d, m) for d, m in list_snapshots(dest) if m is not None]
-    return [snapshot_to_size_against(dest, date)]
+    return [snapshot_to_size_against(dest, date, config_path)]
 
 
 def snapshot_files(snapshot_dir, manifest, unreadable):
@@ -1328,10 +1472,27 @@ def shell_path(path):
     return shlex.quote(path)
 
 
-def show_files(config, missing: bool, from_date: str | None, as_json: bool):
+def config_handle(config_path):
+    """What -c takes to find this config: its name in the config directory, or else its path."""
+    path = Path(config_path)
+    return shlex.quote(path.stem) if path.parent == CONFIG_DIR else shell_path(str(path))
+
+
+def safekeep_for(config_path):
+    """`safekeep` as a printed command must start to read this config again.
+
+    Bare when it is the only config, since -c is then implied. Otherwise with the -c that finds it.
+    """
+    path = Path(config_path)
+    if path.parent == CONFIG_DIR and config_names() == [path.stem]:
+        return 'safekeep'
+    return f'safekeep -c {config_handle(path)}'
+
+
+def show_files(config, config_path, missing: bool, from_date: str | None, as_json: bool):
     """Every file the snapshots hold, one line each, grouped under the newest snapshot holding it."""
     dest = Path(config['back_up_to']).expanduser()
-    snapshots = restorable_snapshots(dest, from_date)
+    snapshots = restorable_snapshots(dest, from_date, config_path)
     copies, unreadable = newest_copies(snapshots, progress=not as_json)
     rows = sorted(copies.values(), key=lambda row: row['path'])
     absent = [row for row in rows if not row['here']]
@@ -1346,6 +1507,7 @@ def show_files(config, missing: bool, from_date: str | None, as_json: bool):
 
     if not snapshots:
         print(f'{yellow("safekeep:")} no restorable snapshots at {cyan(str(dest))}')
+        print(f'  take one: {cyan(f"{safekeep_for(config_path)} backup run")}')
         return
 
     read_from = f'snapshot {cyan(snapshots[0][0].name)}' if from_date else f'{plural(len(snapshots), "snapshot")}'
@@ -1376,7 +1538,7 @@ def show_files(config, missing: bool, from_date: str | None, as_json: bool):
 
     if absent:
         first = absent[0]
-        restore = f'safekeep restore --to / --from {first["snapshot"]} --source {shell_path(first["path"])}'
+        restore = f'{safekeep_for(config_path)} restore --to / --from {first["snapshot"]} --source {shell_path(first["path"])}'
         print(f'\n  restore one: {cyan(restore)}')
     if unreadable:
         report_unreadable(unreadable)
@@ -1407,17 +1569,25 @@ def fzf(lines, args):
     return [line for line in result.stdout.splitlines() if line]
 
 
-def pick_snapshot(dest, config_name):
+def preview_safekeep(config_path):
+    """The safekeep an fzf preview pane runs, reading the config this run resolved.
+
+    `-m safekeep` rather than this file's path: as a package, __file__ is
+    src/safekeep/__init__.py, and running that directly re-imports the module
+    under the name __main__ instead of resolving the installed package. The config goes by
+    its path, because a config passed as a file has no name that resolves to it.
+    """
+    return shlex.join([sys.executable, '-m', 'safekeep', '-c', str(config_path)])
+
+
+def pick_snapshot(dest, config_path):
     """Interactively choose a snapshot, previewing each one's manifest."""
     snapshots = [(d, m) for d, m in list_snapshots(dest) if m is not None]
     if not snapshots:
         print(f'{red("safekeep:")} no restorable snapshots at {cyan(str(dest))}', file=sys.stderr)
         sys.exit(1)
 
-    # `-m safekeep` rather than this file's path: as a package, __file__ is
-    # src/safekeep/__init__.py, and running that directly re-imports the module
-    # under the name __main__ instead of resolving the installed package.
-    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {{2}}'
+    preview_cmd = f'{preview_safekeep(config_path)} snapshots show {{2}}'
 
     # One preformatted column block with the raw name hidden behind it, the same arrangement
     # pick_sources uses: fzf renders a tab as a tab stop rather than aligning a column, and a
@@ -1448,7 +1618,7 @@ def pick_snapshot(dest, config_name):
     return selected[0].split('\t')[1]
 
 
-def pick_sources(snapshot_dir, manifest, config_name):
+def pick_sources(snapshot_dir, manifest, config_path):
     """Interactively choose sources, previewing the files the snapshot holds for each."""
     rows = source_rows(manifest.get('groups', []))
     if not rows:
@@ -1465,7 +1635,7 @@ def pick_sources(snapshot_dir, manifest, config_name):
         for row in rows
     ]
 
-    preview_cmd = f'{sys.executable} -m safekeep --config {config_name} snapshots show {snapshot_dir.name} --source {{2}}'
+    preview_cmd = f'{preview_safekeep(config_path)} snapshots show {snapshot_dir.name} --source {{2}}'
     selected = fzf(
         lines,
         [
@@ -1491,29 +1661,22 @@ def pick_sources(snapshot_dir, manifest, config_name):
 PREVIEW_FILE_LIMIT = 200
 
 
-def show_snapshot_source_files(dest, date, source, as_json=False):
+def show_snapshot_source_files(dest, date, source, config_path, as_json=False):
     """The files a snapshot holds for one source — also the fzf preview pane."""
     snapshot_dir = resolve_snapshot(dest, date)
     manifest = read_manifest(snapshot_dir) if snapshot_dir else None
     if manifest is None:
-        if as_json:
-            unreadable_snapshot(dest, date)
-        print('no manifest — not restorable by safekeep')
-        return
+        fail_unreadable(dest, date, snapshot_dir, config_path)
 
     home_then = manifest.get('home')
     home_now = str(Path.home())
     wanted = normalized_needle(source)
-    row = next(
-        (row for row in source_rows(manifest.get('groups', [])) if wanted in source_names(row['source'], home_then, home_now)),
-        None,
-    )
+    rows = source_rows(manifest.get('groups', []))
+    row = next((row for row in rows if wanted in source_names(row['source'], home_then, home_now)), None)
     if row is None:
-        if as_json:
-            print(f'{red("safekeep:")} {yellow(source)} is not a source in {cyan(snapshot_dir.name)}', file=sys.stderr)
-            sys.exit(1)
-        print(f'{source} is not in {date}')
-        return
+        held = ', '.join(tilde(remap_home(row['source'], home_then, home_now)) for row in rows)
+        print(f'{red("safekeep:")} {source} is not a source in {snapshot_dir.name}\n  its sources: {held}', file=sys.stderr)
+        sys.exit(1)
     source = row['source']
 
     kinds = file_kinds(manifest)
@@ -1964,20 +2127,76 @@ def apply_modes(manifest, entries, dry_run):
     return changed, recorded
 
 
-def explain_empty_selection(manifest, date, request: RestoreRequest):
-    """Say why an explicit selection matched nothing in this snapshot.
+def restore_command(request: RestoreRequest, config_path, from_snapshot=None):
+    """The restore `request` describes, as a command line that runs as printed."""
+    head = safekeep_for(config_path) + (' --no-input' if request.no_input else '') + ' restore'
+    # Each word is quoted alone, because shlex.join would quote a tilde and a quoted one never expands.
+    snapshot = from_snapshot or request.from_date
+    words = ['--to', shell_path(request.to)] + (['--from', shlex.quote(snapshot)] if snapshot else [])
+    selection = (
+        (['--all'] if request.all else [])
+        + [w for s in request.source for w in ('--source', shell_path(s))]
+        + [w for t in request.tag for w in ('--tag', shlex.quote(t))]
+    )
+    words += selection or ['--all']
+    if request.on_conflict != ConflictPolicy.BACKUP:
+        words += ['--on-conflict', request.on_conflict.value]
+    if request.skip_symlinked:
+        words.append('--skip-symlinked')
+    if request.dry_run:
+        words.append('-n')
+    return ' '.join([head, *words])
+
+
+def rehearsal_request(tags=(), sources=()):
+    """A restore into the rehearsal directory, for a command printed beside a listing."""
+    return RestoreRequest(
+        to=str(REHEARSAL_ROOT),
+        from_date=None,
+        all=False,
+        source=list(sources),
+        tag=list(tags),
+        on_conflict=ConflictPolicy.BACKUP,
+        skip_symlinked=False,
+        dry_run=False,
+        no_input=False,
+    )
+
+
+def selected_rows(snapshot_dir, manifest, request: RestoreRequest):
+    """The sources an explicit selection takes from one snapshot, and the paths it names inside them."""
+    rows = source_rows(select_groups(manifest, request) or [])
+    if request.all:
+        return rows
+    whole = {row['source'] for row in rows}
+    inside = rows_inside_sources(snapshot_dir, manifest, request.source)
+    return sorted(rows + [row for row in inside if row['source'] not in whole], key=lambda row: row['source'])
+
+
+def newest_snapshot_selecting(dest, request: RestoreRequest, besides):
+    """The newest snapshot other than `besides` that the selection restores anything from."""
+    for snapshot_dir, manifest in list_snapshots(dest):
+        if manifest is not None and snapshot_dir.name != besides and selected_rows(snapshot_dir, manifest, request):
+            return snapshot_dir.name
+    return None
+
+
+def explain_empty_selection(dest, manifest, date, request: RestoreRequest, config_path):
+    """Say why an explicit selection matched nothing in this snapshot, and which snapshot it would match.
 
     Tags live in the manifest, not in the config -- each one is a copy of what the config said
     on the day the snapshot was taken. Tagging an entry today does not retag the snapshots that
     already exist, and that is the whole of why a restore comes back empty while the config
-    plainly carries the tag. Nothing in "nothing selected" said so.
+    plainly carries the tag. A run narrowed by --tag or --source leaves the newest snapshot
+    holding only part of what the one before it holds, which is the other way to arrive here.
     """
     groups = manifest.get('groups', [])
     if request.tag:
         available = sorted({tag for group in groups for tag in group.get('tags', [])})
+        compare = f'{safekeep_for(config_path)} tags list --from {date}'
         print(f'  no source in {cyan(date)} carries {yellow(", ".join(request.tag))}', file=sys.stderr)
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
-        print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags list")} compares the two', file=sys.stderr)
+        print(f'  a snapshot carries the tags its config had that day, compared with the config by: {cyan(compare)}', file=sys.stderr)
     if request.source:
         needles = yellow(', '.join(request.source))
         home_then, home_now = manifest.get('home'), str(Path.home())
@@ -1986,6 +2205,12 @@ def explain_empty_selection(manifest, date, request: RestoreRequest):
             print(f'    {tilde(remap_home(row["source"], home_then, home_now))}', file=sys.stderr)
     if request.all and not groups:
         print(f'  {cyan(date)} records nothing at all', file=sys.stderr)
+    other = newest_snapshot_selecting(dest, request, besides=date)
+    if other is not None:
+        print(
+            f'  restore it from the newest snapshot that holds it: {cyan(restore_command(request, config_path, from_snapshot=other))}',
+            file=sys.stderr,
+        )
 
 
 def can_prompt(no_input: bool):
@@ -2010,7 +2235,7 @@ def do_restore(config, config_path, request: RestoreRequest):
         date = request.from_date
     elif can_prompt(request.no_input) and not (request.all or request.source or request.tag):
         require_fzf()
-        date = pick_snapshot(dest, config_path.stem)
+        date = pick_snapshot(dest, config_path)
         if date is None:
             print(f'{yellow("safekeep:")} nothing selected, nothing restored')
             return
@@ -2018,45 +2243,44 @@ def do_restore(config, config_path, request: RestoreRequest):
         restorable = [d for d, m in list_snapshots(dest) if m is not None]
         if not restorable:
             print(f'{red("safekeep:")} no restorable snapshots at {cyan(str(dest))}', file=sys.stderr)
+            print(f'  take one: {cyan(f"{safekeep_for(config_path)} backup run")}', file=sys.stderr)
             sys.exit(1)
         date = restorable[0].name
 
     snapshot_dir = resolve_snapshot(dest, date)
-    if snapshot_dir is None:
-        print(f'{red("safekeep:")} no snapshot {yellow(date)} at {cyan(str(dest))}', file=sys.stderr)
+    manifest = read_manifest(snapshot_dir) if snapshot_dir else None
+    if manifest is None:
+        print(f'{red("safekeep:")} {unreadable_reason(dest, date, snapshot_dir, config_path)}', file=sys.stderr)
+        if snapshot_dir is not None:
+            rsync = f'rsync -av {shell_path(str(snapshot_dir))}/ {shell_path(request.to)}'
+            print(f'  copy it out with rsync, without the modes a manifest would restore: {cyan(rsync)}', file=sys.stderr)
         sys.exit(1)
     # A --from naming a day resolves to the last run of it, so the rest of this reports the name
     # that was resolved rather than the one that was typed.
     date = snapshot_dir.name
 
-    manifest = read_manifest(snapshot_dir)
-    if manifest is None:
-        print(f'{red("safekeep:")} snapshot {yellow(date)} has no manifest — safekeep cannot restore it', file=sys.stderr)
-        print(f'  copy it out with rsync directly: {cyan(f"rsync -av {snapshot_dir}/ /")}', file=sys.stderr)
-        sys.exit(1)
-
     groups = select_groups(manifest, request)
     if groups is None:
         if not can_prompt(request.no_input):
-            print(f'{red("safekeep:")} nothing selected — pass {cyan("--all")}, {cyan("--source")}, or {cyan("--tag")}', file=sys.stderr)
+            print(f'{red("safekeep:")} which sources from {cyan(date)}? This run cannot ask, so name them', file=sys.stderr)
+            print(f'  with {cyan("--all")}, {cyan("--source PATH")} or {cyan("--tag NAME")}. The snapshot holds:', file=sys.stderr)
+            home_then, home_now = manifest.get('home'), str(Path.home())
             for row in source_rows(manifest.get('groups', [])):
-                print(f'  {kinds_label(row["kinds"]):<20} {row["source"]}', file=sys.stderr)
+                source = tilde(remap_home(row['source'], home_then, home_now))
+                tags = f'  {green(" ".join(row["tags"]))}' if row['tags'] else ''
+                print(f'  {kinds_label(row["kinds"]):<20} {source}{tags}', file=sys.stderr)
             sys.exit(1)
         require_fzf()
-        rows = pick_sources(snapshot_dir, manifest, config_path.stem)
+        rows = pick_sources(snapshot_dir, manifest, config_path)
     else:
-        rows = source_rows(groups)
-        if not request.all:
-            whole = {row['source'] for row in rows}
-            inside = rows_inside_sources(snapshot_dir, manifest, request.source)
-            rows = sorted(rows + [row for row in inside if row['source'] not in whole], key=lambda row: row['source'])
+        rows = selected_rows(snapshot_dir, manifest, request)
 
     if not rows:
         # An explicit selection that matched nothing is a failed request, not a canceled one:
         # exit non-zero so a caller cannot read it as a restore that happened to be empty.
         if request.all or request.source or request.tag:
             print(f'{red("safekeep:")} nothing selected, nothing restored', file=sys.stderr)
-            explain_empty_selection(manifest, date, request)
+            explain_empty_selection(dest, manifest, date, request, config_path)
             sys.exit(1)
         print(f'{yellow("safekeep:")} nothing selected, nothing restored')
         return
@@ -2107,7 +2331,10 @@ def do_restore(config, config_path, request: RestoreRequest):
     if entries:
         changed, recorded = apply_modes(manifest, entries, request.dry_run)
         verb = yellow('would set') if request.dry_run else green('set')
-        detail = f' ({plural(recorded, "recorded deviation")})' if recorded else ''
+        defaults = changed - recorded
+        parts = [f'{recorded} as the snapshot recorded them'] if recorded else []
+        parts += [f'{defaults} at the default {DEFAULT_FILE_MODE:04o} or {DEFAULT_DIR_MODE:04o}'] if defaults > 0 else []
+        detail = f' ({", ".join(parts)})' if parts else ''
         print(f'\n  {verb} modes on {bold(plural(changed, "path"))}{detail}')
 
     symlink_paths = ['/' + rel for rel in symlinks]
@@ -2170,7 +2397,10 @@ def require_known_selection(config, config_path, request: BackupRequest):
     known = sorted({tag for _, _, tags in entries for tag in tags})
     unknown = [tag for tag in request.tag if tag not in known]
     if unknown:
-        print(f'{red("safekeep:")} no entry in {cyan(config_path.name)} carries {yellow(", ".join(unknown))}', file=sys.stderr)
+        print(
+            f'{red("safekeep:")} no source in config {cyan(config_handle(config_path))} carries {yellow(", ".join(unknown))}',
+            file=sys.stderr,
+        )
         print(f'  tags: {green(", ".join(known)) if known else yellow("none")}', file=sys.stderr)
         sys.exit(2)
     for needle in request.source:
@@ -2214,7 +2444,7 @@ def merge_manifest(existing, manifest):
 
 
 def do_backup(config, config_path, warnings, request: BackupRequest):
-    print(f'{bold("safekeep:")} using config {cyan(config_path.name)}', flush=True)
+    print(f'{bold("safekeep:")} using config {cyan(config_handle(config_path))}', flush=True)
     if request.tag or request.source:
         require_known_selection(config, config_path, request)
         print(f'  {yellow("narrowed to")} sources matching {bold(", ".join(request.tag + request.source))}', flush=True)
@@ -2224,14 +2454,21 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
     excludes = config.get('skip_names_matching', DEFAULT_SKIP_NAMES)
     max_size_mb = config.get('skip_files_over_mb')
 
-    try:
-        dest.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        print(f'{red("safekeep:")} cannot create destination {yellow(str(dest))} — {e}', file=sys.stderr)
+    # Checked against the nearest directory that exists, so a dry run can answer without creating it.
+    nearest = next(path for path in (dest, *dest.parents) if path.exists())
+    if not os.access(nearest, os.W_OK):
+        problem = 'is not writable' if nearest == dest else f'cannot be created, because {nearest} is not writable'
+        print(f'{red("safekeep:")} destination {yellow(str(dest))} {problem}', file=sys.stderr)
         sys.exit(1)
-    if not os.access(dest, os.W_OK):
-        print(f'{red("safekeep:")} destination {yellow(str(dest))} is not writable', file=sys.stderr)
-        sys.exit(1)
+    if request.dry_run:
+        if nearest != dest:
+            print(f'  {yellow("would create")} {cyan(str(dest))}', flush=True)
+    else:
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f'{red("safekeep:")} cannot create destination {yellow(str(dest))} — {e}', file=sys.stderr)
+            sys.exit(1)
 
     snapshot_name = dt.datetime.now().strftime(SNAPSHOT_FORMAT)
     dest_base = dest / snapshot_name
@@ -2283,14 +2520,13 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                 {'kind': 'path', 'source': str(path), 'tags': tags, 'files': survey['files'], 'bytes': survey['bytes']}
             )
             present.append(path)
-        rsync_paths(present, dest_base, excludes, request.dry_run, max_size_mb, link_dest)
-        verb = yellow('would copy') if request.dry_run else green('copied')
-        print(f'  {verb} {bold(plural(len(present), "path"))}')
+        copied = rsync_paths(present, dest_base, excludes, request.dry_run, max_size_mb, link_dest)
+        print(f'  {copy_tally(request.dry_run, copied, plural(len(present), "source"))}')
 
     repos, back_up_untracked, ignored_patterns = repo_entries(config)
     repos = select_sources(repos, request)
     if repos and back_up_untracked:
-        print(f'\n{bold("git_untracked:")}')
+        print(f'\n{bold("untracked:")}')
         for repo_path, tags in repos:
             if not repo_path.exists():
                 print(f'  {yellow("skip:")} {yellow(str(repo_path))} (not found)')
@@ -2313,12 +2549,11 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                     'paths': [snapshot_rel(f) for f in copyable],
                 }
             )
-            rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
-            verb = yellow('would copy') if request.dry_run else green('copied')
-            print(f'  {verb} {bold(plural(survey["files"], "untracked file"))} from {cyan(str(repo_path))}')
+            copied = rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
+            print(f'  {copy_tally(request.dry_run, copied, cyan(tilde(str(repo_path))))}')
 
     if ignored_patterns and repos:
-        print(f'\n{bold("git_ignored:")}')
+        print(f'\n{bold("ignored:")}')
         for repo_path, tags in repos:
             if not repo_path.exists():
                 continue
@@ -2339,9 +2574,8 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                     'paths': [snapshot_rel(f) for f in copyable],
                 }
             )
-            rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
-            verb = yellow('would copy') if request.dry_run else green('copied')
-            print(f'  {verb} {bold(plural(survey["files"], "ignored file"))} from {cyan(str(repo_path))}')
+            copied = rsync_untracked(copyable, dest_base, request.dry_run, link_dest)
+            print(f'  {copy_tally(request.dry_run, copied, cyan(tilde(str(repo_path))))}')
 
     total_files = sum(g['files'] for g in manifest['groups'])
     total_bytes = sum(g['bytes'] for g in manifest['groups'])
@@ -2366,6 +2600,9 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
     verb = yellow('would back up') if request.dry_run else green('backed up')
     summary = f'{bold(plural(total_files, "file"))} ({bold(human_size(total_bytes))})'
     print(f'\n{bold("safekeep:")} {verb} {summary} to {cyan(str(dest_base))} in {bold(elapsed_str)}')
+    # Observed after the copy, because rsync exits 0 and names nothing when a link falls back to a copy.
+    if not request.dry_run:
+        print(f'  unchanged files: {link_verdict(manifest["linked_from"])}')
 
     # Read back off the merged manifest rather than off the request, so a run that passed no --label
     # still reports the label an earlier run in the same second left on this snapshot.
@@ -2374,24 +2611,34 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
 
 
 def init_config(name):
-    """Generate an example config file."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config_path = CONFIG_DIR / f'{name}.toml'
+    """Write the annotated example as a new config, by name or at a path."""
+    if names_a_path(name):
+        # Absolute, as -c resolves it, so the commands printed below run from any directory.
+        config_path = Path(name).expanduser().absolute()
+        if not config_path.parent.is_dir():
+            print(f'{red("safekeep:")} no directory {yellow(str(config_path.parent))} to write {config_path.name} into', file=sys.stderr)
+            sys.exit(1)
+    else:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        config_path = CONFIG_DIR / f'{name}.toml'
 
     if config_path.exists():
         print(f'{yellow("safekeep:")} config already exists: {cyan(str(config_path))}', file=sys.stderr)
-        print(f'  use {cyan("safekeep config show")} to view it, or edit directly', file=sys.stderr)
+        print(f'  change it: {cyan(f"{safekeep_for(config_path)} config edit")}', file=sys.stderr)
         sys.exit(1)
 
     config_path.write_text(CONFIG_TEMPLATE)
+    # Read after the write, so a first config's commands carry no -c.
+    command = safekeep_for(config_path)
 
     print(f'{green("safekeep:")} created {cyan(str(config_path))}')
     print()
-    print('  Edit the file to match your backup needs, then preview with:')
-    print(f'    {cyan(f"safekeep --config {name} backup --dry-run")}')
-    print()
-    print('  Config format reference:')
-    print(f'    {cyan("safekeep --help")}')
+    print('  set back_up_to and the sources, then see what a backup would copy:')
+    print(f'    {cyan(f"{command} config edit")}')
+    print(f'    {cyan(f"{command} backup run -n")}')
+    print(f'  every key, explained: {cyan("safekeep config example")}')
+    if config_path.parent == CONFIG_DIR and len(config_names()) > 1:
+        print(f'  with more than one config, every command names one: {cyan(f"{command} …")}')
 
 
 def edit_config(config_path):

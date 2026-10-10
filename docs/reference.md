@@ -21,13 +21,13 @@ safekeep backup run --dry-run   # Preview what would be copied
 safekeep backup run             # Copy the configured paths into a new snapshot
 safekeep backup run --tag wip   # Copy only the entries tagged 'wip'
 
-safekeep snapshots list                   # What is at the destination
-safekeep snapshots show 2026-08-13        # What one snapshot holds
-safekeep files list --missing             # What older snapshots hold that this machine lacks
-safekeep tags list                        # Which tags exist, and what each would restore
-safekeep tags show wip                    # The sources one tag covers
-safekeep restore --to /tmp/restore-test   # Rehearse: pick a snapshot and sources
-safekeep restore --to / --tag wip         # Restore everything tagged 'wip'
+safekeep snapshots list                             # What is at the destination
+safekeep snapshots show 2026-08-13                  # What one snapshot holds
+safekeep files list --missing                       # What older snapshots hold that this machine lacks
+safekeep tags list                                  # Which tags exist, and what each would restore
+safekeep tags show wip                              # The sources one tag covers
+safekeep restore --to ~/.cache/safekeep/rehearsal   # Rehearse: pick a snapshot and sources
+safekeep restore --to / --tag wip                   # Restore everything tagged 'wip'
 ```
 
 **The verb comes last, and no node acts until one selects it.** That is the no-args-shows-help rule
@@ -57,7 +57,9 @@ here and in `go mod init`.
 
 ## Config
 
-Config files live at `~/.config/safekeep/<name>.toml`. If only one config exists, it auto-loads. With multiple configs, specify which one with `--config`, which is global and goes before the command: `safekeep --config work backup run`.
+Config files live in `$XDG_CONFIG_HOME/safekeep/`, which is `~/.config/safekeep/` when the variable is unset, one `<name>.toml` each. With one config, every command reads it. With several, `-c NAME` picks one, and it goes before the command: `safekeep -c work backup run`. A command run without it prints itself back with `-c` added, naming the configs there are.
+
+`-c` also takes a path to a `.toml` file anywhere. That is the route on a new machine that has only the backup drive: a config holding nothing but `back_up_to` reads every snapshot on it and restores any of them. Pointing `-c` at the snapshot directory itself is an error that says so.
 
 `safekeep config init` writes a complete annotated starter config, and `safekeep config example` prints the same content to stdout without touching the filesystem — which is what you want when the question is "what does that key look like" rather than "set me up". The shape it produces:
 
@@ -193,8 +195,9 @@ SMB without Unix extensions is exactly that case, and it is the primary destinat
 reported, and the run succeeds either way. The field used to be derived from `rsync --help`, so it
 could name a snapshot it shared nothing with, which made the one field that could answer "does
 linking work on this drive" unable to answer it. It now compares inodes after the copying, and
-`safekeep snapshots show` prints the verdict as `storage: shares inodes with <date>` or
-`storage: full copy`. A run of snapshots all reading `full copy` means every one costs its full size.
+`safekeep snapshots show` prints the verdict as `unchanged files: hard links into <snapshot>` or
+`unchanged files: copied in full, linked to no earlier snapshot`. A run of snapshots all reading
+`copied in full` means every one costs its full size.
 
 The hazard is the same one the hard links buy the saving with: a shared file is the *same inode*
 in every snapshot holding it, so editing one in place edits all of them. Copy out before touching
@@ -223,9 +226,11 @@ safekeep backup run --source ~/notes    # only the entries whose path contains t
 safekeep backup run --label 'before the wsl move'   # say why this one was taken
 ```
 
-**Bare `backup` means everything, so `--tag` and `--source` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
+**`backup run` with no selection means everything, so `--tag` and `--source` narrow rather than enable.** There is no `--all` to forget, which is the opposite arrangement to restore, where selection is required and never inferred. The asymmetry is deliberate: the failure to design out of a backup is one that silently covers less than was asked for, and the failure to design out of a restore is one that silently covers more.
 
 A tag or path that matches nothing in the config is a usage error rather than a run that copies nothing, because a backup covering nothing reads exactly like one that covered everything it was asked to — the summary only reports what was copied.
+
+A run names each file it copies, by the path it was copied from, under the kind of source it came from: `paths`, `untracked` or `ignored`. A file unchanged since the previous snapshot goes unnamed: it becomes a hard link into that snapshot, or a full copy where the destination cannot hard-link, and rsync reports neither. Each section's last line counts the files named. The run's last line reads the inodes after the copy and says which happened, in the words `snapshots show` uses: `unchanged files: hard links into <snapshot>` or `unchanged files: copied in full, linked to no earlier snapshot`. `-n` names the same files and writes nothing, the destination directory included.
 
 ### Labels
 
@@ -264,11 +269,11 @@ safekeep tags show secrets       # one tag, source by source, and the restore th
 safekeep tags list --from DATE   # size against an older snapshot instead of the newest
 ```
 
-**A tag lives in two places, and reading either one alone is misleading.** The config says which entries carry it; the manifest inside each snapshot carries a copy of what the config said *on the day that snapshot was taken*. `restore --tag` selects on the manifest, so tagging an entry today does nothing for the snapshots that already exist. `safekeep tags list` reads both sides and marks the disagreements: a tag whose sources are not in the snapshot yet shows `not in this snapshot`, and a tag the config has since dropped or renamed is still listed, because it remains the only name the older snapshots answer to.
+**A tag lives in two places, and reading either one alone is misleading.** The config says which entries carry it; the manifest inside each snapshot carries a copy of what the config said *on the day that snapshot was taken*. `restore --tag` selects on the manifest, so tagging an entry today does nothing for the snapshots that already exist. `safekeep tags list` reads both sides and marks the disagreements. A tag whose sources the snapshot lacks, or holds without that tag, shows `restores nothing from this snapshot`, and one that misses only some says how many it skips. `tags show` marks each such source `absent from this snapshot` or `tagged in the config only`. Where the snapshot holds the files without the tag, it prints the restore by `--source` in place of the one by `--tag`. A tag the config has since dropped or renamed is still listed, because it remains the only name the older snapshots answer to.
 
 That disagreement is the whole reason the command exists. Without it, `restore --to / --tag wsl` reporting `nothing selected` looks like a bug in the tool rather than a snapshot taken before the tag was written.
 
-Sizes come from the snapshot being reported against — the newest restorable one unless `--from` names another — so a tag's row is what a restore would actually bring back rather than what the source paths hold now. Sources carrying no tag at all are counted at the bottom: those are reachable only with `--all` or `--source`, which is worth knowing before a rebuild rather than during one.
+Sizes come from the snapshot being reported against — the newest restorable one unless `--from` names another — and count only the sources a restore by that tag selects. So a tag's row is what the restore would actually bring back rather than what the source paths hold now. The restore `tags show` prints carries `--from` that snapshot, so it still restores what was sized after a newer run lands. Sources the snapshot holds with no tag at all are counted at the bottom: those are reachable only with `--all` or `--source`, which is worth knowing before a rebuild rather than during one.
 
 ## Files
 
@@ -325,7 +330,7 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
                            [--dry-run] [--on-conflict POLICY] [--skip-symlinked]
 ```
 
-`--to` is required. `--to /` is a real restore; `--to /tmp/restore-test` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed.
+`--to` is required. `--to /` is a real restore; `--to ~/.cache/safekeep/rehearsal` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed. That is the directory every printed rehearsal names, under `$XDG_CACHE_HOME` when it is set. It is a cache because deleting it costs nothing. It is the user's own because a fixed path under `/tmp` is shared with every account on the machine, which could create it first. A `~` in `--to` is expanded even where the shell left it alone, as zsh does after `--to=`.
 
 **A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
 
@@ -396,9 +401,9 @@ If the snapshot's home differs from the restoring machine's, paths under it are 
 **Fail fast**: If the destination doesn't exist or isn't writable, exit immediately.
 
 **Every read takes `--json`**, which prints JSON to stdout, and a listing with no rows prints `[]`.
-Without `--json`, `snapshots show` on an absent snapshot prints the reason and succeeds, because it
-is also the fzf preview pane. With `--json` it exits 1 instead, so a caller can tell an answer from a
-miss.
+An absent snapshot or source prints the reason on stderr and exits 1, with or without `--json`.
+The fzf preview panes run `snapshots show` too, and a pane shows stderr and a failed exit as it
+shows stdout.
 
 **Smart exclusions**: Default `skip_names_matching` list (`.venv`, `node_modules`, caches) applied to all rsync calls. Override in config.
 
