@@ -884,9 +884,9 @@ def snapshot_name_width(snapshots):
 
 def snapshot_summary(snapshot_dir, manifest):
     """One snapshot as `snapshots list` reports it. A manifestless one is known by its name alone."""
-    summary = {'name': snapshot_dir.name, 'restorable': manifest is not None}
+    summary = {'snapshot': snapshot_dir.name, 'restorable': manifest is not None}
     if manifest is None:
-        return summary | dict.fromkeys(('created', 'host', 'label', 'files', 'bytes', 'sources', 'linked_from'))
+        return summary | dict.fromkeys(('created', 'host', 'label', 'files', 'bytes', 'source_count', 'linked_from'))
     groups = manifest.get('groups', [])
     return summary | {
         'created': manifest.get('created'),
@@ -894,7 +894,7 @@ def snapshot_summary(snapshot_dir, manifest):
         'label': manifest.get('label'),
         'files': sum(g.get('files', 0) for g in groups),
         'bytes': sum(g.get('bytes', 0) for g in groups),
-        'sources': len(source_rows(groups)),
+        'source_count': len(source_rows(groups)),
         'linked_from': manifest.get('linked_from'),
     }
 
@@ -921,7 +921,7 @@ def show_snapshot_list(dest, as_json=False):
             print(f'  {bold(name)}  {yellow("no manifest — not restorable by safekeep")}')
             continue
         host = summary['host'] or '?'
-        sizes = f'{human_size(summary["bytes"]):>9}  {summary["files"]:>6} files  {summary["sources"]:>2} sources'
+        sizes = f'{human_size(summary["bytes"]):>9}  {summary["files"]:>6} files  {summary["source_count"]:>2} sources'
         cells = f'{name}  {sizes}  {host}'
         row = f'  {bold(name)}  {sizes}  {cyan(host)}'
         # Free text of any length, so it goes last and is clipped against the columns before it:
@@ -951,14 +951,17 @@ def show_snapshot_record(dest, date, as_json=False):
     if as_json:
         if manifest is None:
             unreadable_snapshot(dest, date)
+        home_then = manifest.get('home')
+        home_now = str(Path.home())
         print_json(
             snapshot_summary(snapshot_dir, manifest)
             | {
                 'config_name': manifest.get('config_name'),
-                'home': manifest.get('home'),
+                'home': home_then,
                 'sources': [
                     {
-                        'source': row['source'],
+                        'source': remap_home(row['source'], home_then, home_now),
+                        'recorded': row['source'],
                         'kinds': [KIND_LABELS.get(kind, kind) for kind in row['kinds']],
                         'tags': row['tags'],
                         'files': row['files'],
@@ -1205,31 +1208,37 @@ def restorable_snapshots(dest, date):
     return [snapshot_to_size_against(dest, date)]
 
 
-def snapshot_files(snapshot_dir, manifest):
-    """(path on this machine, stored copy) for every file one snapshot holds.
+def snapshot_files(snapshot_dir, manifest, unreadable):
+    """(path on this machine, path as recorded, stored copy) for every file one snapshot holds.
 
     Path sources record no file list in the manifest, so the snapshot's own tree is walked. The
     path is remapped through this machine's home, which is what lets a file from a WSL image with
-    another username be recognized as the one this machine lacks.
+    another username be recognized as the one this machine lacks. A directory the walk cannot
+    list goes into `unreadable`.
     """
     home_then = manifest.get('home')
     home_now = str(Path.home())
     for row in source_rows(manifest.get('groups', [])):
-        for origin, is_dir in stored_paths(snapshot_dir, row['source']):
+        for origin, is_dir in stored_paths(snapshot_dir, row['source'], unreadable):
             if not is_dir:
-                yield remap_home(str(origin), home_then, home_now), snapshot_dir / snapshot_rel(origin)
+                yield remap_home(str(origin), home_then, home_now), str(origin), snapshot_dir / snapshot_rel(origin)
 
 
 def newest_copies(snapshots, progress):
-    """{path on this machine: row} for every file the snapshots hold, from the newest holding it.
+    """({path on this machine: row}, unreadable) over every file the snapshots hold.
 
     The snapshots arrive newest first, so the first one a path turns up in holds the copy a
     restore would bring back. Every later sighting is an older copy of the same file.
+
+    `unreadable` names each directory the walk could not list and each file it could not stat.
+    The files beneath them are absent from the rows, so a listing that left them out of its
+    verdict would call a partly read snapshot clean.
     """
     copies = {}
+    unreadable = []
     read = 0
     for position, (snapshot_dir, manifest) in enumerate(snapshots, start=1):
-        for path, stored in snapshot_files(snapshot_dir, manifest):
+        for path, recorded, stored in snapshot_files(snapshot_dir, manifest, unreadable):
             read += 1
             if progress and read % 200 == 0:
                 status(f'reading snapshot {position} of {len(snapshots)} … {plural(read, "file")}')
@@ -1238,9 +1247,11 @@ def newest_copies(snapshots, progress):
             try:
                 size = stored.stat().st_size
             except OSError:
+                unreadable.append(str(stored))
                 continue
             copies[path] = {
                 'path': path,
+                'recorded': recorded,
                 'here': os.path.lexists(path),
                 'snapshot': snapshot_dir.name,
                 'label': manifest.get('label'),
@@ -1250,7 +1261,19 @@ def newest_copies(snapshots, progress):
             }
     if progress:
         clear_status()
-    return copies
+    return copies, unreadable
+
+
+def report_unreadable(unreadable):
+    """Name what a listing could not read, and fail the run, since its rows are incomplete."""
+    sys.stdout.flush()
+    print(f'\n{red("safekeep:")} {plural(len(unreadable), "path")} in the snapshots could not be read:', file=sys.stderr)
+    for path in unreadable[:10]:
+        print(f'  {path}', file=sys.stderr)
+    if len(unreadable) > 10:
+        print(f'  ... and {len(unreadable) - 10} more', file=sys.stderr)
+    print(f'  anything {"it holds" if len(unreadable) == 1 else "they hold"} is missing from this listing', file=sys.stderr)
+    sys.exit(1)
 
 
 def shell_path(path):
@@ -1269,13 +1292,16 @@ def show_files(config, args):
     """Every file the snapshots hold, one line each, grouped under the newest snapshot holding it."""
     dest = Path(config['back_up_to']).expanduser()
     snapshots = restorable_snapshots(dest, args.from_date)
-    rows = sorted(newest_copies(snapshots, progress=not args.as_json).values(), key=lambda row: row['path'])
+    copies, unreadable = newest_copies(snapshots, progress=not args.as_json)
+    rows = sorted(copies.values(), key=lambda row: row['path'])
     absent = [row for row in rows if not row['here']]
     if args.missing:
         rows = absent
 
     if args.as_json:
         print_json(rows)
+        if unreadable:
+            report_unreadable(unreadable)
         return
 
     if not snapshots:
@@ -1283,15 +1309,16 @@ def show_files(config, args):
         return
 
     read_from = f'snapshot {cyan(snapshots[0][0].name)}' if args.from_date else f'{plural(len(snapshots), "snapshot")}'
+    partly = f', {red(f"{plural(len(unreadable), 'path')} unreadable")}' if unreadable else ''
     if args.missing and not rows:
-        print(f'{bold("safekeep:")} every file in {read_from} is on this machine')
-        return
-    if args.missing:
+        every = 'every file it could read' if unreadable else 'every file'
+        print(f'{bold("safekeep:")} {every} in {read_from} is on this machine{partly}')
+    elif args.missing:
         verb = 'is' if len(rows) == 1 else 'are'
-        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from} {verb} not on this machine')
+        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from} {verb} not on this machine{partly}')
     else:
         shortfall = f', {yellow(f"{len(absent)} not on this machine")}' if absent else ', every one on this machine'
-        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from}{shortfall}')
+        print(f'{bold("safekeep:")} {bold(plural(len(rows), "file"))} in {read_from}{shortfall}{partly}')
     print(f'  at {cyan(str(dest))}' if args.from_date else f'  at {cyan(str(dest))}, each from the newest snapshot holding it')
 
     # Grouped under the snapshot rather than repeating it on every row: the snapshot is what a
@@ -1311,6 +1338,8 @@ def show_files(config, args):
         first = absent[0]
         restore = f'safekeep restore --to / --from {first["snapshot"]} --source {shell_path(first["path"])}'
         print(f'\n  restore one: {cyan(restore)}')
+    if unreadable:
+        report_unreadable(unreadable)
 
 
 def require_fzf():
@@ -1432,19 +1461,35 @@ def show_snapshot_source_files(dest, date, source, as_json=False):
         print('no manifest — not restorable by safekeep')
         return
 
-    row = next((row for row in source_rows(manifest.get('groups', [])) if row['source'] == source), None)
+    home_then = manifest.get('home')
+    home_now = str(Path.home())
+    wanted = normalized_needle(source)
+    row = next(
+        (row for row in source_rows(manifest.get('groups', [])) if wanted in source_names(row['source'], home_then, home_now)),
+        None,
+    )
     if row is None:
         if as_json:
             print(f'{red("safekeep:")} {yellow(source)} is not a source in {cyan(snapshot_dir.name)}', file=sys.stderr)
             sys.exit(1)
         print(f'{source} is not in {date}')
         return
+    source = row['source']
 
     kinds = file_kinds(manifest)
     if as_json:
         # Every file rather than the preview's first PREVIEW_FILE_LIMIT: the cap is for a pane.
         files = [origin for origin, is_dir in stored_paths(snapshot_dir, source) if not is_dir]
-        print_json([{'path': str(origin), 'kind': kinds.get(snapshot_rel(origin))} for origin in files])
+        print_json(
+            [
+                {
+                    'path': remap_home(str(origin), home_then, home_now),
+                    'recorded': str(origin),
+                    'kind': kinds.get(snapshot_rel(origin)),
+                }
+                for origin in files
+            ]
+        )
         return
     print(f'{kinds_label(row["kinds"])}   {plural(row["files"], "file")}   {human_size(row["bytes"])}')
     if row['tags']:
@@ -1475,10 +1520,10 @@ def select_groups(manifest, args):
 
     home_then = manifest.get('home')
     home_now = str(Path.home())
-    needles = [os.path.expanduser(needle) for needle in args.source]
+    needles = [normalized_needle(needle) for needle in args.source]
     selected = []
     for group in groups:
-        names = (group['source'], remap_home(group['source'], home_then, home_now))
+        names = source_names(group['source'], home_then, home_now)
         matched_source = any(needle in name for needle in needles for name in names)
         matched_tag = any(tag in group.get('tags', []) for tag in args.tag)
         if matched_source or matched_tag:
@@ -1489,23 +1534,27 @@ def select_groups(manifest, args):
 def rows_inside_sources(snapshot_dir, manifest, needles):
     """A row for each --source naming a file or directory inside a source, covering only that path.
 
-    The needle is a path as this machine names it, which is how `files list` prints one, so it is
-    mapped back into the snapshot's home before it is looked up. 'within' is the source it sits
-    in: the restore creates the directories between the two, and gives them the modes it recorded.
+    The needle is a path as this machine names it, which is how `files list` prints one, or as
+    the snapshot recorded it, which is how `snapshots show` prints one. Either is mapped onto the
+    recorded source before it is looked up. 'within' is the source it sits in: the restore creates
+    the directories between the two, and gives them the modes it recorded.
     """
     home_then = manifest.get('home')
     home_now = str(Path.home())
     rows = {}
     for needle in needles:
-        wanted = os.path.normpath(os.path.expanduser(needle))
+        wanted = normalized_needle(needle)
         if not os.path.isabs(wanted):
             continue
         for group in manifest.get('groups', []):
             source = group['source']
-            source_here = remap_home(source, home_then, home_now)
-            if not wanted.startswith(source_here.rstrip('/') + '/'):
+            named = next(
+                (name for name in source_names(source, home_then, home_now) if wanted.startswith(name.rstrip('/') + '/')),
+                None,
+            )
+            if named is None:
                 continue
-            origin = source + wanted[len(source_here) :]
+            origin = os.path.normpath(source) + wanted[len(named) :]
             if not (snapshot_dir / snapshot_rel(origin)).exists():
                 continue
             row = rows.setdefault(origin, {'source': origin, 'within': source, 'kinds': [], 'tags': []})
@@ -1539,6 +1588,16 @@ def remap_home(source, manifest_home, target_home):
     return source
 
 
+def normalized_needle(needle):
+    """A --source as typed, with its ~ expanded and any trailing slash or ./ dropped."""
+    return os.path.normpath(os.path.expanduser(needle))
+
+
+def source_names(source, manifest_home, target_home):
+    """A recorded source as the snapshot names it, then as this machine names it."""
+    return (os.path.normpath(source), os.path.normpath(remap_home(source, manifest_home, target_home)))
+
+
 def paths_under(source, candidates):
     """Absolute paths from candidates that are the source itself or live beneath it."""
     prefix = str(source).rstrip('/') + '/'
@@ -1550,11 +1609,36 @@ def paths_under_any(sources, candidates):
     return sorted({p for source in sources for p in paths_under(source, candidates)})
 
 
+def symlinked_ancestors(row, candidates):
+    """The directories above a path inside a source that were symlinks when backed up.
+
+    Only a row naming a path inside a source has any. A symlink at ~/.config/nvim is
+    dereferenced into the snapshot, so restoring ~/.config/nvim/init.lua writes through that
+    link where it still exists here, and into a fresh real directory where it does not.
+    """
+    within = row.get('within')
+    if within is None:
+        return []
+    links = set(candidates)
+    return sorted(str(parent) for parent in Path(row['source']).parents if parent.is_relative_to(within) and str(parent) in links)
+
+
+def selection_count(rows):
+    """How many whole sources and how many paths inside one a restore covers, in words."""
+    inside = [row for row in rows if row.get('within')]
+    whole = len(rows) - len(inside)
+    parts = [plural(whole, 'source')] if whole or not inside else []
+    if inside:
+        holders = 'a source' if len({row['within'] for row in inside}) == 1 else 'sources'
+        parts.append(f'{plural(len(inside), "path")} inside {holders}')
+    return ' and '.join(parts)
+
+
 class RestoreAborted(Exception):
     """Answering quit at an --on-conflict ask prompt, which stops the run where it stands."""
 
 
-def stored_paths(snapshot_dir, source):
+def stored_paths(snapshot_dir, source, unreadable=None):
     """Every path the snapshot holds for one source, as the absolute paths it had when backed up.
 
     Parents come before children, and the source itself is the first entry.
@@ -1563,13 +1647,19 @@ def stored_paths(snapshot_dir, source):
     The target's own tree can answer none of those: a repo whose untracked files are being
     restored has a whole working tree beside them that no snapshot ever recorded, and walking
     that is how a restore of two hundred files came to chmod eleven thousand paths.
+
+    Each directory the walk cannot list is appended to `unreadable` when a caller passes one.
     """
     stored = snapshot_dir / snapshot_rel(source)
     if stored.is_file():
         return [(Path(source), False)]
 
+    def note(error):
+        if unreadable is not None:
+            unreadable.append(error.filename)
+
     found = [(Path(source), True)]
-    for dirpath, dirnames, filenames in os.walk(stored):
+    for dirpath, dirnames, filenames in os.walk(stored, onerror=note):
         relative = os.path.relpath(dirpath, stored)
         base = Path(source) if relative == '.' else Path(source) / relative
         found.extend((base / name, True) for name in sorted(dirnames))
@@ -1673,6 +1763,10 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
     symlinked = paths_under(source, ['/' + rel for rel in symlinks])
     if args.skip_symlinked and str(source) in symlinked:
         print(f'      {yellow("skip: was a symlink")}')
+        return None
+    linked_above = symlinked_ancestors(row, ['/' + rel for rel in symlinks])
+    if args.skip_symlinked and linked_above:
+        print(f'      {yellow(f"skip: inside {tilde(linked_above[0])}, which was a symlink")}')
         return None
 
     entries = target_entries(
@@ -1845,9 +1939,10 @@ def explain_empty_selection(manifest, date, args):
         print(f'  a snapshot carries the tags its config had that day — {cyan("safekeep tags list")} compares the two', file=sys.stderr)
     if args.source:
         needles = yellow(', '.join(args.source))
+        home_then, home_now = manifest.get('home'), str(Path.home())
         print(f'  no source in {cyan(date)} contains {needles}, and it holds nothing at that path inside one:', file=sys.stderr)
         for row in source_rows(groups):
-            print(f'    {tilde(row["source"])}', file=sys.stderr)
+            print(f'    {tilde(remap_home(row["source"], home_then, home_now))}', file=sys.stderr)
     if args.all and not groups:
         print(f'  {cyan(date)} records nothing at all', file=sys.stderr)
 
@@ -1931,7 +2026,7 @@ def do_restore(config, config_path, args):
     kinds = file_kinds(manifest)
 
     verb = yellow('would restore') if args.dry_run else green('restoring')
-    print(f'{bold("safekeep:")} {verb} {bold(plural(len(rows), "source"))} from {cyan(date)} to {cyan(args.to)}')
+    print(f'{bold("safekeep:")} {verb} {bold(selection_count(rows))} from {cyan(date)} to {cyan(args.to)}')
     # A date says when a snapshot was taken and nothing about why, which is the question being
     # answered when an older one is picked on purpose.
     if manifest.get('label'):
@@ -1947,7 +2042,10 @@ def do_restore(config, config_path, args):
     restored = []
     entries = []
     decision = {'all': None}
-    width = max(len(tilde(row['source'])) for row in rows)
+    # Where each source lands rather than where it was recorded, which is the form --source and
+    # `files list` both take.
+    landing = {row['source']: tilde(remap_home(row['source'], manifest_home, target_home)) for row in rows}
+    width = max(len(name) for name in landing.values())
     for position, row in enumerate(rows, start=1):
         # Printed before the work rather than after it: this line is what says which source the
         # wait belongs to, and after the fact it says nothing that was not already known. The
@@ -1955,14 +2053,14 @@ def do_restore(config, config_path, args):
         # restored, when what a snapshot holds is the files git could not put back.
         counter = cyan(f'[{position}/{len(rows)}]')
         sizes = size_cell(row['files'], row['bytes'])
-        print(f'  {counter} {tilde(row["source"]):<{width}}  {sizes}  {cyan(kinds_label(row["kinds"]))}', flush=True)
+        print(f'  {counter} {landing[row["source"]]:<{width}}  {sizes}  {cyan(kinds_label(row["kinds"]))}', flush=True)
         try:
             restored_entries = restore_source(snapshot_dir, row, args.to, manifest_home, target_home, symlinks, kinds, args, decision)
         except RestoreAborted:
             print(f'\n  {yellow("stopped here")} — the sources already restored are left as they are')
             break
         if restored_entries is not None:
-            restored.append(row['source'])
+            restored.append(row)
             entries.extend(restored_entries)
 
     if entries:
@@ -1971,7 +2069,8 @@ def do_restore(config, config_path, args):
         detail = f' ({plural(recorded, "recorded deviation")})' if recorded else ''
         print(f'\n  {verb} modes on {bold(plural(changed, "path"))}{detail}')
 
-    restored_symlinks = paths_under_any(restored, ['/' + rel for rel in symlinks])
+    symlink_paths = ['/' + rel for rel in symlinks]
+    restored_symlinks = paths_under_any([row['source'] for row in restored], symlink_paths)
     if restored_symlinks and not args.skip_symlinked:
         print(f'\n{yellow("note:")} {len(restored_symlinks)} restored paths were symlinks when backed up, and are now real files:')
         for abs_path in restored_symlinks[:10]:
@@ -1980,8 +2079,19 @@ def do_restore(config, config_path, args):
             print(f'  ... and {len(restored_symlinks) - 10} more')
         print(f'  remove them and run {cyan("dotfiles link")} to restore the symlinks, or use {cyan("--skip-symlinked")} next time')
 
+    linked_above = sorted({link for row in restored for link in symlinked_ancestors(row, symlink_paths)})
+    if linked_above:
+        were = 'directory that was a symlink' if len(linked_above) == 1 else 'directories that were symlinks'
+        print(f'\n{yellow("note:")} restored paths sit inside {len(linked_above)} {were} when backed up:')
+        for abs_path in linked_above[:10]:
+            print(f'  {abs_path} -> {symlinks[abs_path.lstrip("/")]}')
+        if len(linked_above) > 10:
+            print(f'  ... and {len(linked_above) - 10} more')
+        print('  where that link still exists here, the restore wrote through it into what it points at')
+        print(f'  where it does not, it is now a real directory — use {cyan("--skip-symlinked")} to leave these paths alone')
+
     verb = yellow('would restore') if args.dry_run else green('restored')
-    print(f'\n{bold("safekeep:")} {verb} {bold(plural(len(restored), "source"))} to {cyan(args.to)}')
+    print(f'\n{bold("safekeep:")} {verb} {bold(selection_count(restored))} to {cyan(args.to)}')
 
 
 def select_sources(entries, args):
@@ -2530,7 +2640,7 @@ def show_restore_help():
     help_row('--to', '<path>', 'Restore target root (/ for a real restore)')
     help_row('--from', '<date>', 'Snapshot to restore from (default: pick, else newest)')
     help_row('--on-conflict', '<mode>', 'backup (default), skip, overwrite, newer, ask')
-    help_row('--skip-symlinked', '', 'Skip paths that were symlinks when backed up')
+    help_row('--skip-symlinked', '', 'Skip paths that were symlinks when backed up, or sat under one')
     help_row('-n, --dry-run', '', 'Show what would be restored, change nothing')
     help_row('-h, --help', '', 'Show this help')
     help_text(

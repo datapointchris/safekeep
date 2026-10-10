@@ -1394,8 +1394,8 @@ def test_snapshots_list_json_flags_a_snapshot_without_a_manifest(tmp_path, sourc
     run_safekeep('--config', str(config_path), 'backup', 'run', '--label', 'why')
     (dest / '2020-01-01').mkdir()
     newest, bare = read_json(config_path, 'snapshots', 'list')
-    assert (newest['label'], newest['sources'], newest['files']) == ('why', 1, 3)
-    assert (bare['name'], bare['restorable'], bare['files']) == ('2020-01-01', False, None)
+    assert (newest['label'], newest['source_count'], newest['files']) == ('why', 1, 3)
+    assert (bare['snapshot'], bare['restorable'], bare['files']) == ('2020-01-01', False, None)
 
 
 def test_snapshots_show_json_carries_its_sources_and_fails_on_an_absent_one(tmp_path, source_tree):
@@ -1752,6 +1752,47 @@ def test_restore_skip_symlinked_omits_only_the_symlinked_group(tmp_path, source_
     assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
 
 
+def config_dir_with_a_symlinked_subdir(tmp_path):
+    """A path entry over a config directory whose nvim subdirectory is a symlink into a shared
+    checkout, backed up. Returns the config, and the file under the link."""
+    config = tmp_path / 'src' / 'config'
+    config.mkdir(parents=True)
+    (config / 'app.toml').write_text('app\n')
+    shared = tmp_path / 'shared' / 'nvim'
+    shared.mkdir(parents=True)
+    (shared / 'init.lua').write_text('init\n')
+    (config / 'nvim').symlink_to(shared)
+
+    config_path = write_config(tmp_path, tmp_path / 'dest', back_up_paths=paths(config))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    return config_path, config / 'nvim' / 'init.lua'
+
+
+def test_skip_symlinked_skips_a_file_restored_from_under_a_directory_that_was_a_symlink(tmp_path):
+    """A path entry over a config dir whose nvim subdir was a symlink, restoring init.lua under
+    it. Where that link still exists, rsync writes through it into the checkout it points at."""
+    config_path, init = config_dir_with_a_symlinked_subdir(tmp_path)
+    target = tmp_path / 'target'
+    args = ('--config', str(config_path), 'restore', '--to', str(target), '--source', str(init), '--skip-symlinked')
+    restore = run_safekeep(*args)
+    assert restore.returncode == 0, restore.stderr
+    assert 'which was a symlink' in plain(restore.stdout)
+    assert not (target / safekeep.snapshot_rel(init)).exists()
+
+
+def test_restoring_a_file_from_under_a_directory_that_was_a_symlink_names_the_link(tmp_path):
+    """A path entry over a config dir whose nvim subdir was a symlink, restoring init.lua under
+    it without --skip-symlinked: the file is restored, and the run names the link it sat under."""
+    config_path, init = config_dir_with_a_symlinked_subdir(tmp_path)
+    target = tmp_path / 'target'
+    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--source', str(init))
+    assert restore.returncode == 0, restore.stderr
+    assert (target / safekeep.snapshot_rel(init)).read_text() == 'init\n'
+    out = plain(restore.stdout)
+    assert 'sit inside 1 directory that was a symlink' in out
+    assert f'{init.parent} -> {tmp_path / "shared" / "nvim"}' in out
+
+
 def test_restore_refuses_a_snapshot_without_a_manifest(tmp_path):
     dest = tmp_path / 'dest'
     (dest / '2026-01-01').mkdir(parents=True)
@@ -1784,35 +1825,30 @@ def test_restore_remaps_a_different_home(tmp_path, source_tree):
     assert stat.S_IMODE((landed / 'secret.txt').stat().st_mode) == 0o600
 
 
-def test_group_selection_matches_on_substring():
-    manifest = {
-        'groups': [
-            {'kind': 'path', 'source': '/home/c/notes', 'tags': []},
-            {'kind': 'path', 'source': '/mnt/c/docs', 'tags': ['windows']},
-        ]
-    }
-    args = type('Args', (), {'all': False, 'source': ['notes'], 'tag': []})()
-    assert [g['source'] for g in safekeep.select_groups(manifest, args)] == ['/home/c/notes']
-
-
-def test_group_selection_returns_none_when_nothing_specified():
-    args = type('Args', (), {'all': False, 'source': [], 'tag': []})()
-    assert safekeep.select_groups({'groups': []}, args) is None
-
-
-def test_group_selection_matches_a_source_as_this_machine_names_it(monkeypatch):
+def test_restore_source_names_a_single_file_source_under_this_machines_home(tmp_path, source_tree):
     """`files list` prints a single-file source under this machine's home, and the snapshot
     recorded it under the home it was taken in."""
-    monkeypatch.setenv('HOME', '/home/new')
-    manifest = {
-        'home': '/home/old',
-        'groups': [
-            {'kind': 'path', 'source': '/home/old/.gitconfig', 'tags': []},
-            {'kind': 'path', 'source': '/home/old/notes', 'tags': []},
-        ],
-    }
-    args = type('Args', (), {'all': False, 'source': ['/home/new/.gitconfig'], 'tag': []})()
-    assert [g['source'] for g in safekeep.select_groups(manifest, args)] == ['/home/old/.gitconfig']
+    dest = tmp_path / 'dest'
+    target = tmp_path / 'target'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'solo.conf'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    relocate_under_home(latest_snapshot(dest), source_tree / 'solo.conf', '/home/someone-else')
+
+    home = tmp_path / 'home'
+    env = {**os.environ, 'HOME': str(home)}
+    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--source', str(home / 'solo.conf'), env=env)
+    assert restore.returncode == 0, restore.stderr
+
+    landed = target / safekeep.snapshot_rel(home / 'solo.conf')
+    assert landed.read_text() == 'solo\n'
+    assert stat.S_IMODE(landed.stat().st_mode) == 0o600
+
+
+def test_restore_source_takes_a_whole_source_typed_with_a_trailing_slash(tmp_path, source_tree):
+    """Tab completion ends a directory with a slash, so `~/.ssh/` is how a source gets typed."""
+    restore, target = backup_and_restore(tmp_path, source_tree, '--source', str(source_tree / 'notes') + '/')
+    assert restore.returncode == 0, restore.stderr
+    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').read_text() == 'plain\n'
 
 
 def test_restore_source_inside_a_source_restores_that_file_alone(tmp_path, source_tree):
@@ -1820,6 +1856,7 @@ def test_restore_source_inside_a_source_restores_that_file_alone(tmp_path, sourc
     secret = source_tree / 'notes' / 'secret.txt'
     restore, target = backup_and_restore(tmp_path, source_tree, '--source', str(secret))
     assert restore.returncode == 0, restore.stderr
+    assert 'restored 1 path inside a source' in plain(restore.stdout)
 
     landed = target / safekeep.snapshot_rel(secret)
     assert landed.read_text() == 'secret\n'
@@ -1882,6 +1919,44 @@ def test_restore_source_finds_a_path_this_machine_names_under_another_home(tmp_p
     assert landed.read_text() == 'secret\n'
     assert stat.S_IMODE(landed.stat().st_mode) == 0o600
     assert not (landed.parent / 'plain.md').exists()
+
+
+def test_restore_source_finds_a_path_inside_a_source_as_the_old_home_named_it(tmp_path, source_tree):
+    """On a machine whose home differs, `snapshots show` lists a source as the snapshot recorded
+    it, under the old home, and a path pasted from there names a file inside that source."""
+    dest = tmp_path / 'dest'
+    target = tmp_path / 'target'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    recorded = relocate_under_home(latest_snapshot(dest), source_tree / 'notes', '/home/someone-else')
+
+    home = tmp_path / 'home'
+    env = {**os.environ, 'HOME': str(home)}
+    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--source', f'{recorded}/secret.txt', env=env)
+    assert restore.returncode == 0, restore.stderr
+
+    landed = target / safekeep.snapshot_rel(home / 'notes' / 'secret.txt')
+    assert landed.read_text() == 'secret\n'
+    assert not (landed.parent / 'plain.md').exists()
+
+
+def test_snapshots_show_source_takes_a_source_as_this_machine_names_it(tmp_path, source_tree):
+    """On a machine whose home differs, `files list` prints every path under this machine's home,
+    and that is the form a source gets copied out of it in."""
+    dest = tmp_path / 'dest'
+    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
+    run_safekeep('--config', str(config_path), 'backup', 'run')
+    snapshot = latest_snapshot(dest)
+    recorded = relocate_under_home(snapshot, source_tree / 'notes', '/home/someone-else')
+
+    home = tmp_path / 'home'
+    env = {**os.environ, 'HOME': str(home)}
+    args = ('--config', str(config_path), 'snapshots', 'show', snapshot.name, '--source', str(home / 'notes'), '--json')
+    result = run_safekeep(*args, env=env)
+    assert result.returncode == 0, result.stderr
+
+    plain_md = next(row for row in json.loads(result.stdout) if row['path'].endswith('plain.md'))
+    assert (plain_md['path'], plain_md['recorded']) == (str(home / 'notes' / 'plain.md'), f'{recorded}/plain.md')
 
 
 def test_repo_groups_sharing_a_subtree_are_restored_once(tmp_path):

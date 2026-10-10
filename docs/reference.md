@@ -295,8 +295,13 @@ recorded at `/home/olduser/.config/app/settings.toml` is looked for at `~/.confi
 **Path sources record no file list, so the listing walks every snapshot's tree.** Over a network
 drive that is one stat per file per snapshot. It only reads, and it prints a counter while it walks.
 
-`--json` carries each file's `stored` path, its location inside the snapshot, so a file can be read
-before deciding whether it comes back.
+**A listing that could not read part of a snapshot exits 1.** The files under an unreadable
+directory are absent from its rows, so it names each such path on stderr and never reports that
+every file is on this machine.
+
+`--json` gives each file two more paths. `stored` is its copy inside the snapshot, so a file can be
+read before deciding whether it comes back. `recorded` is the path under the home the snapshot was
+taken in, beside `path`, which is where it belongs on this machine.
 
 ### Bringing back what an older machine had
 
@@ -325,10 +330,15 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
 **A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
 
 **`--source` also takes a full path to a file or directory inside a source, and restores that path
-alone.** That is the form `safekeep files list` prints. The path is matched as this machine names
-it, so a snapshot taken under another home still finds it. Restoring one file can mean creating the
+alone.** That is the form `safekeep files list` prints. The path is matched both as this machine
+names it and as the snapshot recorded it, so a path copied from `files list` or from `snapshots show`
+finds the same file in a snapshot taken under another home. Restoring one file can mean creating the
 directories between it and its source, and those get the modes the snapshot recorded: `~/.ssh/config`
 into a machine with no `~/.ssh` brings the directory back at `0700`.
+
+A directory above that path may have been a symlink when backed up, such as a `~/.config/nvim`
+linked into a shared checkout. Where the link still exists here, the restore writes through it into
+whatever it points at. `--skip-symlinked` skips such a path, and without it the run names the link.
 
 **Selection is always explicit.** With `--all`, `--source`, or `--tag`, restore runs non-interactively. With none of them on a terminal, fzf opens: first a snapshot picker previewing each manifest, then a multi-select source picker previewing the files that source holds, labeled untracked or ignored. With none of them and no terminal, it exits non-zero listing the available sources rather than guessing.
 
@@ -385,10 +395,10 @@ If the snapshot's home differs from the restoring machine's, paths under it are 
 
 **Fail fast**: If the destination doesn't exist or isn't writable, exit immediately.
 
-**Every read takes `--json`**: `snapshots list`, `snapshots show`, `files list`, `tags list`,
-`tags show` and `config show` print JSON to stdout, and a listing with no rows prints `[]`. Without
-`--json`, `snapshots show` on an absent snapshot prints the reason and succeeds, because it is also
-the fzf preview pane. With `--json` it exits 1 instead, so a caller can tell an answer from a miss.
+**Every read takes `--json`**, which prints JSON to stdout, and a listing with no rows prints `[]`.
+Without `--json`, `snapshots show` on an absent snapshot prints the reason and succeeds, because it
+is also the fzf preview pane. With `--json` it exits 1 instead, so a caller can tell an answer from a
+miss.
 
 **Smart exclusions**: Default `skip_names_matching` list (`.venv`, `node_modules`, caches) applied to all rsync calls. Override in config.
 
