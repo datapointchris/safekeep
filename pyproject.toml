@@ -16,10 +16,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# An application, so this is the application floor rather than a library's — the
-# only caller is the person running it. Matches the floor the script carried as
-# a PEP 723 header in dotfiles.
-requires-python = ">=3.12"
+# An application, so it takes the current floor rather than a library's lower one.
+# The only caller is the person running it, and uv fetches a matching interpreter.
+requires-python = ">=3.13"
 
 # typer owns the command tree, and rich renders its help. pytermstyle colors the
 # command output and clips rows to the terminal, so a run reads like the shell
