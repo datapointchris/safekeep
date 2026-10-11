@@ -210,10 +210,10 @@ tags = ["windows"]
 back_up_untracked_files = true
 
 # Gitignored files worth keeping anyway, matched in every repo below. A pattern
-# matches a whole repo-relative path or any single component of it, so
-# ".planning" catches everything beneath a .planning/ directory at any depth,
-# and "*.env" catches a stray secret wherever it sits.
-back_up_ignored_files_matching = ["CLAUDE.md", ".planning", "*.env"]
+# matches a whole repo-relative path or any single component of it. So
+# "CLAUDE.md" catches one in any subdirectory, a directory's name catches
+# everything beneath it, and "*.env" catches a stray secret wherever it sits.
+back_up_ignored_files_matching = ["CLAUDE.md", "*.env"]
 
 [[git.repos]]
 path = "~/dotfiles"

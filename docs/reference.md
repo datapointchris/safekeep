@@ -78,7 +78,7 @@ tags = ["notes"]
 
 [git]
 back_up_untracked_files = true
-back_up_ignored_files_matching = ["CLAUDE.md", ".planning"]
+back_up_ignored_files_matching = ["CLAUDE.md", "*.env"]
 
 [[git.repos]]
 path = "~/dotfiles"
@@ -104,7 +104,7 @@ tags = ["wip"]
 - `git` — `repos` names the subject; every other key states what is taken from them (optional)
   - `repos` — the git repos themselves
   - `back_up_untracked_files` — copy each repo's untracked files (default `true`)
-  - `back_up_ignored_files_matching` — glob patterns matched against the *gitignored* files in those same repos, so `CLAUDE.md` and `.planning` survive a rebuild
+  - `back_up_ignored_files_matching` — glob patterns matched against the *gitignored* files in those same repos, so `CLAUDE.md` and a stray `.env` survive a rebuild
 - `skip_names_matching` — patterns no backup ever copies (optional, has sensible defaults)
 - `skip_files_over_mb` — skip files larger than this many MB (optional)
 
@@ -116,7 +116,7 @@ Every `[[back_up_paths]]` and `[[git.repos]]` block takes a `path` and optional 
 
 **`back_up_untracked_files` exists even though nothing else can set it to `false`.** Copying untracked files is what the repo block did unconditionally before, and a config that leaves an outcome-shaping default unstated reads as though the tool does nothing but what is written. A key whose value never changes still earns its place when it is the only thing telling the reader what will be copied.
 
-A repo's ignored files are found by set subtraction: `git ls-files --others` (untracked plus ignored) minus `git ls-files --others --exclude-standard` (untracked only), since git has no single flag that lists ignored files without the untracked ones. A pattern matches either the whole repo-relative path or any single component of it, which is why `.planning` catches everything beneath a `.planning/` directory at any depth.
+A repo's ignored files are found by set subtraction: `git ls-files --others` (untracked plus ignored) minus `git ls-files --others --exclude-standard` (untracked only), since git has no single flag that lists ignored files without the untracked ones. A pattern matches either the whole repo-relative path or any single component of it, which is why a directory's name catches everything beneath that directory at any depth.
 
 **Tags are labels, not policy.** safekeep never interprets what a tag means — it displays them in the picker and accepts `--tag NAME` as a selector. That keeps scenario knowledge (which paths matter on a rebuild) in the config where it was written, rather than in the tool. The [Tags](#tags) section below covers where a tag lives once a snapshot has been taken.
 
@@ -389,7 +389,7 @@ Each source prints its position, path, size and kinds *before* rsync is called o
 
 ```text
   [2/3] ~/code/project        14 files      82 KB  untracked + ignored
-      + .planning/status.md   ignored
+      + CLAUDE.md             ignored
       ~ scratch.py            untracked   kept .pre-restore copy
       2 files restored · 1 replaced · 11 unchanged
 ```
