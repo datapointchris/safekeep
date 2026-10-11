@@ -106,7 +106,7 @@ uv tool install git+https://github.com/datapointchris/safekeep
 ```bash
 task test       # pytest
 task lint       # ruff, mypy, bandit
-task fix        # ruff format and autofix
+task format     # ruff format and autofix
 ```
 
 Releases are cut by python-semantic-release from conventional commits on `main`. Nothing is tagged

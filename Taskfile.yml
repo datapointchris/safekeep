@@ -2,9 +2,10 @@ version: "3"
 
 tasks:
   default:
-    desc: Run the test suite (default)
+    desc: List the available tasks
+    silent: true
     cmds:
-      - task: test
+      - task --list
 
   # A worktree is a clean checkout, so everything gitignored is absent. The
   # virtualenv comes back from uv.lock; .planning has no manifest and is
@@ -32,14 +33,19 @@ tasks:
       - echo "Coverage report{{":"}} htmlcov/index.html"
 
   lint:
-    desc: Run ruff, mypy, and bandit
+    desc: Run ruff, mypy, and bandit without writing any file
     cmds:
       - uv run ruff format --check .
       - uv run ruff check .
-      - uv run mypy src
+      - task: typecheck
       - uv run bandit -c pyproject.toml -r src
 
-  fix:
+  typecheck:
+    desc: Type check with mypy
+    cmds:
+      - uv run mypy src
+
+  format:
     desc: Apply ruff formatting and autofixes
     cmds:
       - uv run ruff format .
