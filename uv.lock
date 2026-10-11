@@ -583,7 +583,6 @@ wheels = [
 
 [[package]]
 name = "safekeep"
-version = "2.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "pyselfupdate", extra = ["typer"] },

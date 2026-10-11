@@ -1,6 +1,6 @@
 [project]
 name = "safekeep"
-version = "2.3.0"
+dynamic = ["version"]
 description = "Config-driven file preservation with self-describing timestamped snapshots"
 authors = [{ name = "Chris Birch", email = "datapointchris@gmail.com" }]
 license = "MIT"
@@ -172,20 +172,19 @@ dev = [
     "tomli-w>=1.0.0",
 ]
 
-[tool.semantic_release]
-version_toml = ["pyproject.toml:project.version"]
-commit_message = "build(release): {version}"
-# Reads the uv-lock hook's rev, the one uv release every uv.lock writer runs.
-build_command = '''
-    pip install "uv==$(python -c 'import re; print(re.search(r"uv-pre-commit\s+rev: \"?([\w.]+)", open(".pre-commit-config.yaml").read())[1])')"
-    uv lock --upgrade-package safekeep
-    git add uv.lock
-'''
+# The release tag is the version. python-semantic-release finds no file to
+# stamp, so it tags the merge commit itself and writes no release commit.
+# uv_build cannot do this: its metadata has no dynamic version field.
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+style = "semver"
+
+# A new commit or tag changes the version, so it has to invalidate uv's cache.
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 
 [build-system]
-requires = ["uv_build>=0.11.32,<0.13.0"]
-build-backend = "uv_build"
-
-[tool.uv.build-backend]
-module-name = "safekeep"
-module-root = "src"
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
