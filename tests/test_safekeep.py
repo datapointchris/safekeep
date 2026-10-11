@@ -30,6 +30,7 @@ import typer.main
 from typer.testing import CliRunner
 
 import safekeep
+from safekeep.main import app
 
 
 def write_config(tmp_path, dest, **extra):
@@ -155,7 +156,6 @@ def test_help_lists_every_public_command(tmp_path):
 
 def help_examples():
     """Every invocation a help screen offers as an example, from every command's epilog."""
-    from safekeep.main import app
 
     def epilogs(command):
         yield command.epilog or ''
@@ -171,7 +171,6 @@ def help_examples():
 def test_every_help_example_names_commands_and_flags_safekeep_has():
     """A trailing -h answers only once the line parses, so an unknown command or flag still fails."""
     runner = CliRunner()
-    from safekeep.main import app
 
     assert runner.invoke(app, ['restore', '--to', '/', '--frm', 'x', '-h']).exit_code == 2, 'a bad flag must fail through the -h'
     examples = help_examples()
