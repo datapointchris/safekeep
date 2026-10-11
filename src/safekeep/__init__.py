@@ -37,6 +37,8 @@ from fnmatch import fnmatch
 from functools import cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_version
+from itertools import chain
+from itertools import product
 from pathlib import Path
 
 from pytermstyle import bold
@@ -1747,7 +1749,7 @@ def select_groups(manifest, request: RestoreRequest):
     selected = []
     for group in groups:
         names = source_names(group['source'], home_then, home_now)
-        matched_source = any(source_selects(needle, name) for needle in request.source for name in names)
+        matched_source = any(source_selects(needle, name) for needle, name in product(request.source, names))
         matched_tag = any(tag in group.get('tags', []) for tag in request.tag)
         if matched_source or matched_tag:
             selected.append(group)
@@ -1842,7 +1844,8 @@ def paths_under(source, candidates):
 
 def paths_under_any(sources, candidates):
     """Absolute paths from candidates covered by any of the sources, deduplicated."""
-    return sorted({p for source in sources for p in paths_under(source, candidates)})
+    covered = chain.from_iterable(paths_under(source, candidates) for source in sources)
+    return sorted(set(covered))
 
 
 def symlinked_ancestors(row, candidates):
@@ -2166,11 +2169,11 @@ def restore_command(request: RestoreRequest, config_path, from_snapshot=None):
     # Each word is quoted alone, because shlex.join would quote a tilde and a quoted one never expands.
     snapshot = from_snapshot or request.from_date
     words = ['--to', shell_path(request.to)] + (['--from', shlex.quote(snapshot)] if snapshot else [])
-    selection = (
-        (['--all'] if request.all else [])
-        + [w for s in request.source for w in ('--source', shell_path(s))]
-        + [w for t in request.tag for w in ('--tag', shlex.quote(t))]
-    )
+    selection = ['--all'] if request.all else []
+    for source in request.source:
+        selection += ['--source', shell_path(source)]
+    for tag in request.tag:
+        selection += ['--tag', shlex.quote(tag)]
     words += selection or ['--all']
     if request.on_conflict != ConflictPolicy.BACKUP:
         words += ['--on-conflict', request.on_conflict.value]
@@ -2225,7 +2228,8 @@ def explain_empty_selection(dest, manifest, date, request: RestoreRequest, confi
     """
     groups = manifest.get('groups', [])
     if request.tag:
-        available = sorted({tag for group in groups for tag in group.get('tags', [])})
+        carried = chain.from_iterable(group.get('tags', []) for group in groups)
+        available = sorted(set(carried))
         compare = f'{safekeep_for(config_path)} tags list --from {date}'
         print(f'  no source in {cyan(date)} carries {yellow(", ".join(request.tag))}', file=sys.stderr)
         print(f'  tags in this snapshot: {green(", ".join(available)) if available else yellow("none")}', file=sys.stderr)
@@ -2389,7 +2393,8 @@ def do_restore(config, config_path, request: RestoreRequest):
             print(f'  ... and {len(restored_symlinks) - 10} more')
         print(f'  remove them and run {cyan("dotfiles link")} to restore the symlinks, or use {cyan("--skip-symlinked")} next time')
 
-    linked_above = sorted({link for row in restored for link in symlinked_ancestors(row, symlink_paths)})
+    ancestors = chain.from_iterable(symlinked_ancestors(row, symlink_paths) for row in restored)
+    linked_above = sorted(set(ancestors))
     if linked_above:
         were = 'a directory above these paths was a symlink' if len(linked_above) == 1 else 'directories above these paths were symlinks'
         wrote, became = ('would write', 'would become') if request.dry_run else ('wrote', 'is now')
@@ -2544,7 +2549,7 @@ def require_known_selection(config, config_path, request: BackupRequest):
     backing up nothing.
     """
     entries = config_entries(config)
-    known = sorted({tag for _, _, tags in entries for tag in tags})
+    known = sorted(set(chain.from_iterable(tags for _, _, tags in entries)))
     unknown = [tag for tag in request.tag if tag not in known]
     if unknown:
         print(

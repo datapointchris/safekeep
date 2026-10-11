@@ -71,8 +71,13 @@ class InWorkflowOrder(TyperGroup):
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         """A root option typed after the command fails with the command printed with it moved before."""
-        valued = {opt for param in self.params if not getattr(param, 'is_flag', True) for opt in param.opts}
-        movable = {opt for param in self.params if param.name in ('config', 'no_input') for opt in param.opts}
+        valued: set[str] = set()
+        movable: set[str] = set()
+        for param in self.params:
+            if not getattr(param, 'is_flag', True):
+                valued.update(param.opts)
+            if param.name in ('config', 'no_input'):
+                movable.update(param.opts)
         at = 0
         while at < len(args) and args[at].startswith('-'):
             at += 2 if args[at] in valued else 1

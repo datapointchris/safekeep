@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from itertools import chain
 from pathlib import Path
 
 import pytest
@@ -161,10 +162,10 @@ def help_examples():
         for child in getattr(command, 'commands', {}).values():
             yield from epilogs(child)
 
-    found = [
-        shlex.split(example) for epilog in epilogs(typer.main.get_command(app)) for example in re.findall(r'`(safekeep [^`]+)`', epilog)
-    ]
-    return [example[1:] for example in found]
+    found = []
+    for epilog in epilogs(typer.main.get_command(app)):
+        found += [shlex.split(example)[1:] for example in re.findall(r'`(safekeep [^`]+)`', epilog)]
+    return found
 
 
 def test_every_help_example_names_commands_and_flags_safekeep_has():
@@ -420,7 +421,7 @@ def test_the_shipped_template_demonstrates_repetition_not_one_of_each(tmp_path):
     assert len(entries) > 1
     assert len(repos) > 1
     assert len(patterns) > 1
-    tags = [tag for _, entry_tags in entries + repos for tag in entry_tags]
+    tags = [*chain.from_iterable(entry_tags for _, entry_tags in entries + repos)]
     assert len(tags) > len(set(tags))  # a tag reused across entries, which is how tags are used
 
 
