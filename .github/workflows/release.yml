@@ -20,11 +20,44 @@ jobs:
   validate:
     uses: ./.github/workflows/validate.yml
 
-  # There is no publish job. safekeep is installed from this repo with uv, and
-  # the private index is the next channel; nothing goes to public PyPI. The tag
-  # is what an install resolves against.
   release:
     needs: validate
     uses: datapointchris/reusable-workflows/.github/workflows/python-semantic-release.yml@v1
     permissions:
       contents: write
+
+  # A separate job in the same workflow, gated on the one above.
+  #
+  # Same workflow because a tag pushed with GITHUB_TOKEN does not trigger
+  # another workflow run, so a publish keyed on `push: tags` would never fire.
+  # Separate job so the index credentials are reachable from these steps only,
+  # and not from the release job that runs python-semantic-release.
+  #
+  # A commit type that bumps nothing leaves `released` false, and this job is
+  # skipped. A skipped publish on a green run is the correct result there.
+  publish:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The tag, not the branch. The version is read from the tag, so a
+          # build anywhere else names the previous release plus a distance, and
+          # main may already have moved past what was released.
+          ref: ${{ needs.release.outputs.tag }}
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - run: uv build
+
+      # pypiserver rejects a second upload of a filename it already holds and
+      # offers no yank, so the sdist and wheel are checked while the upload is
+      # still avoidable.
+      - run: uv run --no-project --with twine twine check dist/*
+
+      - name: Publish to pypi.ichrisbirch.com
+        run: uv publish --publish-url https://pypi.ichrisbirch.com/
+        env:
+          UV_PUBLISH_USERNAME: ${{ secrets.PYPI_ICB_USERNAME }}
+          UV_PUBLISH_PASSWORD: ${{ secrets.PYPI_ICB_PASSWORD }}
