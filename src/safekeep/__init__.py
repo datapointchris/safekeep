@@ -9,8 +9,9 @@ machine.
 Primary use case: backing up scattered config files, local scripts, and git-untracked
 WIP to a network drive that cannot represent Unix modes.
 
-Unchanged files are hard-linked into the previous snapshot, so snapshots stay complete
-trees while costing only what changed. That is why there is no retention policy.
+Unchanged files are hard-linked into the previous snapshot where rsync lists --link-dest
+and the destination accepts the link, so snapshots stay complete trees while costing only
+what changed. That is why there is no retention policy.
 
 Config: ~/.config/safekeep/<name>.toml (the manifest stays JSON -- machines write it)
 
@@ -699,14 +700,12 @@ LINK_PROBE_LIMIT = 200
 def link_source_of(snapshot_dir, link_dest):
     """The name of the snapshot this one is observed to share inodes with, or None.
 
-    Asking rsync for --link-dest is not evidence it happened. The option is absent on openrsync,
-    and a destination filesystem can refuse link() and leave rsync copying instead -- neither is
-    reported, and the run succeeds either way. SMB without Unix extensions is exactly that case,
-    and it is the primary destination.
+    Passing --link-dest is not evidence it happened. A destination filesystem can refuse link()
+    and leave rsync copying instead. rsync reports nothing and exits 0. SMB without Unix
+    extensions is exactly that case, and it is the primary destination.
 
-    So this reads the inodes rather than the flag. Recording the flag meant the manifest named a
-    snapshot it might share nothing with, which is the one field that could have answered whether
-    the linking works here.
+    So this reads the inodes rather than the flag. A name taken from the flag could be a snapshot
+    this one shares nothing with, and this field is the one that answers whether linking works.
     """
     if link_dest is None:
         return None
@@ -727,14 +726,14 @@ def link_source_of(snapshot_dir, link_dest):
 
 
 def link_dest_flags(link_dest):
-    """--link-dest against the previous snapshot, when there is one and this rsync has it.
+    """--link-dest against the previous snapshot, when there is one and this rsync lists the option.
 
     Unchanged files then cost a hard link rather than a copy, so keeping every snapshot forever
     stays affordable — which is the policy, snapshots are never pruned. Absolute, because rsync
     resolves a relative --link-dest against the destination directory and the two are siblings.
 
-    Silently absent on openrsync, which has no --link-dest: the snapshot is a full copy instead,
-    identical in content and restorable by the same code. Degrading is the whole point of asking.
+    An rsync whose help does not list --link-dest gets no flag. Its snapshot is a full copy,
+    identical in content and restorable by the same code.
     """
     if link_dest is None or not rsync_supports('--link-dest'):
         return []
@@ -824,11 +823,10 @@ def run_backup_rsync(cmd):
 
 @cache
 def rsync_help():
-    """This rsync's own option list, which is the only reliable thing to ask it about.
+    """The help text of the rsync on PATH, read once per run.
 
-    A restore does not get to assume the good rsync: macOS ships openrsync as /usr/bin/rsync,
-    and a disaster recovery is precisely the moment the Homebrew rsync this repo declares has
-    not been installed yet. Both print their options, so both can be asked.
+    rsync builds differ in which options they take. An optional flag is passed only where this
+    text names it, so an rsync that lacks one still completes the run without it.
     """
     probe = subprocess.run(['rsync', '--help'], capture_output=True, text=True)
     return probe.stdout + probe.stderr
@@ -856,8 +854,8 @@ RSYNC_NOISE = (
 def rsync_naming_flags():
     """The flags that make rsync name each path it writes, and stream them a line at a time.
 
-    --out-format is the exact answer and is what rsync 3.x gets; -v is the same list buried in
-    summary lines, and is all openrsync offers. Without --outbuf the output is block-buffered
+    --out-format is the exact answer. -v is the same list buried in summary lines, for an rsync
+    whose help does not list --out-format. Without --outbuf the output is block-buffered
     into a pipe, and a restore that reports in 4 KB bursts is no better than one that says
     nothing until it finishes.
     """

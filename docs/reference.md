@@ -188,13 +188,13 @@ manifest's `linked_from` names the snapshot the inodes are shared with, or is `n
 copy. Deleting a snapshot directory is always safe; the data survives as long as any other snapshot
 links it.
 
-**`linked_from` records sharing that was observed, not a flag that was passed.** Asking rsync for
-`--link-dest` is not evidence it happened. The option is absent from the openrsync macOS ships as
-`/usr/bin/rsync`, and a destination filesystem can refuse `link()` and leave rsync copying instead —
-SMB without Unix extensions is exactly that case, and it is the primary destination. Neither is
-reported, and the run succeeds either way. The field used to be derived from `rsync --help`, so it
-could name a snapshot it shared nothing with, which made the one field that could answer "does
-linking work on this drive" unable to answer it. It now compares inodes after the copying, and
+**`linked_from` records sharing that was observed, not a flag that was passed.** safekeep passes
+`--link-dest` only where `rsync --help` lists it, and an rsync that does not list it copies every
+file in full. Passing the option is still not evidence it happened. A destination filesystem can
+refuse `link()` and leave rsync copying instead. SMB without Unix extensions is exactly that case,
+and it is the primary destination. rsync reports nothing, and the run succeeds either way. A field
+taken from the flag could name a snapshot this one shares nothing with, and could not answer "does
+linking work on this drive". So `linked_from` compares inodes after the copying, and
 `safekeep snapshots show` prints the verdict as `unchanged files: hard links into <snapshot>` or
 `unchanged files: copied in full, linked to no earlier snapshot`. A run of snapshots all reading
 `copied in full` means every one costs its full size.
@@ -396,7 +396,7 @@ Each source prints its position, path, size and kinds *before* rsync is called o
 
 `+` is a file the target did not have, `~` one that was already there. Whether it existed is read before rsync runs, which is the only chance to read it — afterwards every path is present and nothing distinguishes the two. The kind comes from the manifest's per-group file lists, so it is only ever shown for a repo's files, where it is the thing worth knowing.
 
-The list is what rsync actually wrote, so files it skipped as identical are counted rather than named. That is also why there is no progress bar: the file lines are the progress signal, and interleaving `--info=progress2`'s redraws with them produced neither. `--out-format=%n` gets the exact list from rsync 3.x, `-v` gets it from the openrsync macOS ships as `/usr/bin/rsync`, and `--outbuf=L` keeps it streaming rather than arriving in 4 KB bursts.
+The list is what rsync actually wrote, so files it skipped as identical are counted rather than named. That is also why there is no progress bar: the file lines are the progress signal, and interleaving `--info=progress2`'s redraws with them produced neither. `--out-format=%n` gets the exact list from an rsync whose help lists that option, and `-v` gets it from one whose help does not. `--outbuf=L`, where the help lists it, keeps the list streaming rather than arriving in 4 KB bursts.
 
 The mode pass prints a counter of its own, that being one `chmod` syscall per restored path and minutes of them over SMB. Redirected output gets every line above and none of the redrawn ones: a carriage return collapses a captured log into a single unreadable line, and a restore is exactly the thing run under `tee`.
 

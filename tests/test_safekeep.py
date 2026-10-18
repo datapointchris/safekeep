@@ -1144,9 +1144,8 @@ def test_the_manifest_names_the_snapshot_it_shares_inodes_with(tmp_path, source_
 
 
 def test_linked_from_reads_inodes_rather_than_the_rsync_flag(tmp_path, source_tree):
-    """Passing --link-dest is not evidence it happened: openrsync lacks the option, and a
-    destination can refuse link() and leave rsync copying. Neither is reported. The field named
-    a snapshot it might share nothing with, which is the one thing it existed to answer."""
+    """Passing --link-dest is not evidence it happened. A destination can refuse link() and leave
+    rsync copying, and rsync reports nothing."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     run_safekeep('--config', str(config_path), 'backup', 'run')
@@ -1154,7 +1153,7 @@ def test_linked_from_reads_inodes_rather_than_the_rsync_flag(tmp_path, source_tr
 
     # rsync links on a content match, so the link-dest copies are made to differ from the source.
     # --link-dest is still passed and still finds nothing to link, which is the shape of a
-    # destination that refuses link(). The old code recorded the name regardless.
+    # destination that refuses link().
     for stored in previous.rglob('*'):
         if stored.is_file() and stored.name != safekeep.MANIFEST_NAME:
             stored.write_text('different\n')

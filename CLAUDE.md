@@ -21,11 +21,11 @@ fails mypy rather than a run. `src/safekeep/__init__.py` holds the logic and pri
   stores no Unix modes, so the backup writes with `--no-perms`. The manifest records each mode
   that deviates from `0644` or `0755`, and restore applies it. Tests call `flatten_modes` before a
   restore, because a local destination keeps modes and would hide a replay that does nothing.
-- **`linked_from` records sharing that was observed.** It compares inodes after the copy rather
-  than trusting the flags passed. openrsync, which macOS ships as `/usr/bin/rsync`, lacks
-  `--link-dest`, and an SMB destination can refuse `link()` without a word: rsync copies the file
-  in full, names nothing and exits 0. So a backup's output never says what linking did until
-  `link_verdict` has read the inodes.
+- **`linked_from` records sharing that was observed.** `link_dest_flags` passes `--link-dest`
+  only where `rsync --help` lists it. A destination can still refuse `link()`, as SMB can without
+  a word: rsync copies the file in full, names nothing and exits 0. So `link_source_of` compares
+  inodes after the copy, and a backup's output says what linking did only once `link_verdict`
+  has read them.
 - **One snapshot per run, named for the second it started, never pruned.** Two runs in one second
   share a name, and `merge_manifest` folds the second into the first. rsync never deletes, so a
   manifest naming only the second run would strand the first run's files.
