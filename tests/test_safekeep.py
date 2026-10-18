@@ -354,12 +354,10 @@ def test_normalize_entries_reads_tables_with_optional_tags():
 
 def test_normalize_entries_expands_a_variable_in_the_path(monkeypatch):
     """A file whose location differs per machine is declared as a variable and set on each
-    one, so the same config text backs up the right file everywhere. dotfiles generates a
-    block carrying $REPOS_JSON for exactly this reason — it cannot resolve another
-    machine's registry, and must not write its own answer into that machine's config."""
-    monkeypatch.setenv('REPOS_JSON', '/declared/repos.json')
-    entries = safekeep.normalize_entries([{'path': '$REPOS_JSON'}])
-    assert entries[0] == (Path('/declared/repos.json'), [])
+    one, so the same config text backs up the right file everywhere."""
+    monkeypatch.setenv('APP_CONFIG', '/per/machine/app.toml')
+    entries = safekeep.normalize_entries([{'path': '$APP_CONFIG'}])
+    assert entries[0] == (Path('/per/machine/app.toml'), [])
 
 
 def test_normalize_entries_leaves_an_unset_variable_literal(monkeypatch):

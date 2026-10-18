@@ -2388,7 +2388,7 @@ def do_restore(config, config_path, request: RestoreRequest):
             print(f'  {abs_path} -> {symlinks[abs_path.lstrip("/")]}')
         if len(restored_symlinks) > 10:
             print(f'  ... and {len(restored_symlinks) - 10} more')
-        print(f'  remove them and run {cyan("dotfiles link")} to restore the symlinks, or use {cyan("--skip-symlinked")} next time')
+        print(f'  remove them and recreate each link to the target shown, or use {cyan("--skip-symlinked")} next time')
 
     ancestors = chain.from_iterable(symlinked_ancestors(row, symlink_paths) for row in restored)
     linked_above = sorted(set(ancestors))
