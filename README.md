@@ -22,19 +22,21 @@ reasoning behind each of them.
 
 ## Install
 
-safekeep installs as a uv tool, from a tagged release. uv fetches the Python it needs.
+safekeep installs as a uv tool, from the package index every release is published to. uv fetches
+the Python it needs.
 
 ```bash
-tag=$(git ls-remote --tags --refs --sort=-v:refname https://github.com/datapointchris/safekeep 'v*' | head -1 | cut -d/ -f3)
-uv tool install "git+https://github.com/datapointchris/safekeep@$tag"   # the newest release
-safekeep --version                                                      # the release that installed
-safekeep update --check                                                 # whether a newer one exists
+uv tool install --index https://pypi.ichrisbirch.com/simple/ safekeep   # the newest release
+safekeep --version                                                       # the release that installed
+safekeep update --check                                                  # whether a newer one exists
 ```
 
+Name the index on the install: without it uv asks PyPI, where `safekeep` is a different project.
+uv records the index beside the tool, which is where `safekeep update` reads it back.
+
 `safekeep update` installs the newest release over the running one. It refuses an install from the
-default branch, because a branch carries no release version to compare. Install from a tag to keep
-it updatable. Every other command checks for a newer release at most once a day, and names one it
-finds in a line on stderr.
+default branch, because a branch carries no release version to compare. Every other command checks
+for a newer release at most once a day, and names one it finds in a line on stderr.
 
 safekeep runs `rsync` for every copy and `git` for repo sources. It needs `fzf` only for the
 interactive restore pickers.
