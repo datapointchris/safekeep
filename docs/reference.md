@@ -2,9 +2,6 @@
 
 The full behavior, and the reasoning behind it. `README.md` is the short version.
 
-This document moved here from the dotfiles repository in August 2026, when safekeep became its
-own project. The decisions it records were made while it lived there.
-
 Config-driven file preservation that rsync-copies files and directories to a destination as timestamped snapshots, one per run. Each snapshot carries a manifest describing what was collected, so a snapshot can be restored without the config that produced it. The copying is rsync, and restore shells out to fzf for interactive selection.
 
 Primary use case: backing up scattered config files, local scripts, and git-untracked WIP from a WSL work machine to a network drive for crash protection, and restoring them onto a rebuilt machine.
@@ -30,30 +27,26 @@ safekeep restore --to ~/.cache/safekeep/rehearsal   # Rehearse: pick a snapshot 
 safekeep restore --to / --tag wip                   # Restore everything tagged 'wip'
 ```
 
-**The verb comes last, and no node acts until one selects it.** That is the no-args-shows-help rule
-in `standards/cli-design.md`, and it holds at every level: bare `safekeep`, bare `safekeep backup`
-and bare `safekeep config` each print the screen that completes the command line and exit 2. Walking
-the tree one token at a time is therefore a way to read it rather than a way to trigger it.
+**The verb comes last, and no node acts until one selects it.** Bare `safekeep`, bare
+`safekeep backup` and bare `safekeep config` each print the screen that completes the command line
+and exit 2. Walking the tree one token at a time is therefore a way to read it rather than a way to
+trigger it.
 
-**`backup` is a namespace and `run` is the verb that writes.** Bare `backup` used to copy every
-configured path the moment it was typed, which made the exploratory invocation the destructive one —
-over a network drive, with no way to ask what it would do short of remembering `--dry-run`. It is
-also the arrangement the rule exists to prevent for a second reason: a command that acts bare cannot
-gain a sibling without silently changing what the bare form means, and everyone who typed it out of
-habit then runs something else.
+**`backup` is a namespace and `run` is the verb that writes.** A bare `backup` that copied would make
+the exploratory invocation the destructive one, over a network drive, with no way to ask what it
+would do short of remembering `--dry-run`. A command that acts bare also cannot gain a sibling
+without silently changing what the bare form means. Everyone who typed it out of habit would then
+run something else.
 
-**`snapshots` and `tags` are namespaces for the same reason, and the change paid for itself
-immediately.** `tags wip` was a positional where a `show` belonged, and the two commands feeding
-fzf's preview panes — `preview-snapshot` and `preview-source` — were `snapshots show` with the name
-left off, hidden because there was no noun to hang them on. Giving `snapshots` a verb slot gave them
-one, so the tree now has no undocumented command in it at all.
+**`snapshots` and `tags` are namespaces for the same reason.** Each read is a verb under its noun,
+so a tag is shown by `tags show wip` rather than a bare `tags wip`. The fzf preview panes run
+`snapshots show`, so the tree holds no hidden command for them.
 
-**`config` was the first of them and is the model.** It was previously a root-level `init` plus a
-bare `config` that printed — which meant `config` occupied the noun slot while doing a verb's job,
-leaving nowhere for `config init` to go. The rules are in `cli-design.md`: a resource that could ever
-grow a second command is a namespace today, and `init` belongs to whatever it initializes. `git init`
-creates the tool's entire subject; a config file is one artifact among several, which is why it nests
-here and in `go mod init`.
+**`config` is a namespace too, and `init` belongs to it.** A bare `config` that printed would occupy
+the noun slot while doing a verb's job, and leave nowhere for `config init` to go. A resource that
+could ever grow a second command is a namespace from the start, and `init` belongs to whatever it
+initializes. `git init` creates the tool's entire subject. A config file is one artifact among
+several, which is why its `init` nests under it, as in `go mod init`.
 
 ## Config
 
@@ -89,11 +82,11 @@ path = "~/code/side-project"
 tags = ["wip"]
 ```
 
-**Every key states what safekeep will do, so the file reads as a description of the backup rather than a list of this program's variables.** That is the standard in `standards/configuration.md`, and safekeep is its worked example.
+**Every key states what safekeep will do, so the file reads as a description of the backup rather than a list of this program's variables.**
 
 **TOML, not JSON, and the reason is `tomllib`.** Every dependency is one more package to get onto a locked-down work machine, where installing one is a fight, and `tomllib` has been in the standard library since 3.11 while YAML has never had a stdlib parser and never will. Comments come free with that choice, and they are what turns the file into its own manual. YAML would additionally have been the wrong fit for a config full of glob patterns: an unquoted `*.pyc` is alias syntax rather than a string, and bare `~` is null.
 
-`tomllib` reads but cannot write, so `init` emits a hand-authored template rather than serializing a dict — which is the better half of the trade, since a serialized dict cannot carry comments. `CONFIG_TEMPLATE` in the script is that file, and two tests assert it parses without warnings and demonstrates repetition rather than one of each key.
+`tomllib` reads but cannot write, so `init` emits a hand-authored template rather than serializing a dict — which is the better half of the trade, since a serialized dict cannot carry comments. `CONFIG_TEMPLATE` in `src/safekeep/__init__.py` is that file.
 
 **The `[git]` keys must precede the first `[[git.repos]]` block.** TOML closes a table as soon as a subtable opens, so a `back_up_untracked_files` written after the repo blocks is read as part of the last repo. This fails loudly rather than silently, but it is the one ordering constraint the format imposes here.
 
@@ -108,13 +101,13 @@ tags = ["wip"]
 - `skip_names_matching` — patterns no backup ever copies (optional, has sensible defaults)
 - `skip_files_over_mb` — skip files larger than this many MB (optional)
 
-Every `[[back_up_paths]]` and `[[git.repos]]` block takes a `path` and optional `tags`. Under JSON an entry could also be a bare path string, so there were two shapes to write and two to parse; an array of tables is uniform, and gives every entry a line of its own to be commented on.
+Every `[[back_up_paths]]` and `[[git.repos]]` block takes a `path` and optional `tags`. A bare path string is refused. An array of tables gives every entry one shape to write and parse, and a line of its own to be commented on.
 
-**The repo options are nested because they only mean something relative to the repos beside them.** They were once two sibling keys, `git_untracked` and `git_ignored`, which read as two independent lists of things to back up — nothing in the config said the second was a filter scoped to the first, and the answer was only findable in the source. Structure carries that relationship where a name could not, which is why the parent key is a scope and the leaves are statements about it.
+**The repo options are nested because they only mean something relative to the repos beside them.** Two sibling keys, such as `git_untracked` and `git_ignored`, would read as two independent lists of things to back up. Nothing in the config would say the second filters the first. Structure carries that relationship where a name could not, which is why the parent key is a scope and the leaves are statements about it.
 
-**Inside a scope, one key names the subject and the rest state what happens to it.** `repos` is that subject key. An earlier attempt called it `at`, on the theory that a preposition would let the key complete its parent's phrase — "git repos *at* `~/code/project`". It reads only while the parent is adjacent, and is opaque in every error message, doc reference, and line of code that names the leaf alone. A subject is a noun and resists being made to state an action; the rest of the block does that work.
+**Inside a scope, one key names the subject and the rest state what happens to it.** `repos` is that subject key. A preposition such as `at` would let the key complete its parent's phrase — "git repos *at* `~/code/project`". It reads only while the parent is adjacent, and is opaque in every error message, doc reference, and line of code that names the leaf alone. A subject is a noun and resists being made to state an action; the rest of the block does that work.
 
-**`back_up_untracked_files` exists even though nothing else can set it to `false`.** Copying untracked files is what the repo block did unconditionally before, and a config that leaves an outcome-shaping default unstated reads as though the tool does nothing but what is written. A key whose value never changes still earns its place when it is the only thing telling the reader what will be copied.
+**`back_up_untracked_files` is stated even at its default of `true`.** A config that leaves an outcome-shaping default unstated reads as though the tool does nothing but what is written. A key whose value rarely changes still earns its place when it is the only thing telling the reader what will be copied.
 
 A repo's ignored files are found by set subtraction: `git ls-files --others` (untracked plus ignored) minus `git ls-files --others --exclude-standard` (untracked only), since git has no single flag that lists ignored files without the untracked ones. A pattern matches either the whole repo-relative path or any single component of it, which is why a directory's name catches everything beneath that directory at any depth.
 
@@ -128,11 +121,11 @@ A repo's ignored files are found by set subtraction: `git ls-files --others` (un
 
 Unrecognized keys warn and are ignored rather than erroring, so a config can be edited ahead of the tool. A missing required key is still fatal.
 
-A generic warning is adequate for a typo but not for a key that used to mean something. Retired keys therefore carry their own message, listed in `RETIRED_KEYS` in the script. Unrecognized keys are also recorded in the snapshot manifest as `config_warnings`, so a snapshot carries evidence that its config was partly ignored when it was taken.
+A generic warning is adequate for a typo but not for a retired key, one that once meant something. Retired keys therefore carry their own message, listed in `RETIRED_KEYS` in `src/safekeep/__init__.py`. Unrecognized keys are also recorded in the snapshot manifest as `config_warnings`, so a snapshot carries evidence that its config was partly ignored when it was taken.
 
 Renamed keys are fatal rather than warned, and are listed separately in `RENAMED_KEYS`. The distinction is whether ignoring the key shrinks the backup: dropping a retired `keep` changes nothing about what gets copied, while ignoring an old `git_untracked` would skip every repo in the config. A run that fails loudly is fixed immediately; a backup that quietly gets smaller is not noticed until a restore needs the files that are not in it.
 
-The config is hand-written and there are few of them, so it has no version field. The manifest is machine-written and outlives tool versions, so it does — and that same split is why the config moved to TOML while the manifest stayed JSON.
+The config is hand-written and there are few of them, so it has no version field. The manifest is machine-written and outlives tool versions, so it does — and that same split is why the config is TOML and the manifest is JSON.
 
 A config left behind as `.json` is named rather than reported as absent: `no configs found` is a bewildering thing to read when the file is sitting in the directory. `resolve_config` lists every leftover with the name it should have.
 
@@ -158,13 +151,13 @@ A subdirectory is created per run, named for the second it started. Full directo
 
 Path construction: `back_up_to / YYYY-MM-DDTHH-MM-SS / absolute-path-from-root`
 
-**One snapshot per run, not per day, and the reason is a measured data-loss window.** A second run
-on a day used to rsync into the same directory, so a file created and then mangled between the two
-runs lost its good version — the morning copy was overwritten and no earlier snapshot held it,
-because the file had not existed when the earlier ones were taken. That is precisely the
-git-untracked work-in-progress safekeep exists for. Files that survived a previous day were never at
-risk: rsync writes a temp file and renames it over the target, which breaks the hard link and leaves
-the older snapshot's inode untouched.
+**One snapshot per run, not per day, and the reason is a data-loss window.** With one snapshot per
+day, a second run would rsync into the same directory. A file created and then mangled between the
+two runs would lose its good version: the morning copy is overwritten, and no earlier snapshot holds
+it, because the file did not exist when the earlier ones were taken. That is precisely the
+git-untracked work in progress safekeep exists for. A file an earlier day's snapshot holds is safe
+either way: rsync writes a temp file and renames it over the target, which breaks the hard link and
+leaves the older snapshot's inode untouched.
 
 **The name holds no colon, which rules out strict ISO 8601.** NTFS forbids a colon in a filename and
 the primary destination is SMB, so `2026-08-13T17:04:32` cannot be written. The time is hyphenated
@@ -175,9 +168,8 @@ person asking for a date almost always means, and an exact name always wins over
 command that resolves one reports the name it resolved to rather than what was typed, so a prefix
 that matched something unintended is visible in the answer.
 
-**Snapshots written before the time was added are still found.** They are named for a day alone, and
-they stay listable and restorable — that is the whole of what compatibility means here, since nothing
-about an older snapshot's contents differs.
+**A snapshot named for a day alone is found too.** It lists and restores like any other, since
+nothing about its contents differs.
 
 **Snapshots are never pruned.** Deciding how many backups to keep is not safekeep's job.
 
@@ -249,19 +241,18 @@ consumes, and a label is prose about one particular day.
 
 **The note stays on the run it describes.** A snapshot is one run, so the routine backup that runs
 after the risky thing writes its own snapshot and cannot overwrite the label the earlier one wrote.
-This used to need a merge rule, back when a second run that day rewrote the same manifest.
 
-The manifest version does not move for this. It went to 2 for the git groups' file lists, which
-*restore* reads and behaves differently for; nothing branches on a label, so a version gate would be
-a number no reader checks. Every snapshot taken before this existed has no `label` key and renders
-without one — the displays ask with `.get`, and there is no empty column or trailing separator left
-where a note would have been.
+A label does not move the manifest version. The version marks a change a reader branches on, such as
+the git groups' file lists, which *restore* reads and behaves differently for. Nothing branches on a
+label, so a version gate would be a number no reader checks. A manifest without a `label` key renders
+without one — the displays ask with `.get`, and leave no empty column or trailing separator where a
+note would be.
 
-**A narrowed run writes a partial snapshot of its own.** `backup run --tag secrets` records the sources that tag covers and nothing else, and the fuller snapshot from earlier sits beside it untouched. This is the one behavior that changed shape when snapshots became per-run rather than per-day: a narrowed run used to top up the day's snapshot, and now it does not. So the newest snapshot is not necessarily the most complete one.
+**A narrowed run writes a partial snapshot of its own.** `backup run --tag secrets` records the sources that tag covers and nothing else, and the fuller snapshot from earlier sits beside it untouched. A narrowed run never tops up an earlier snapshot. So the newest snapshot is not necessarily the most complete one.
 
 **A narrowed run says so in its manifest, because nothing else can tell.** A snapshot holding fewer sources than the one before it may follow a source dropped from the config, and a new machine whose config holds only `back_up_to` has no source list to compare against. So the run records its selection as `narrowed_to`. `snapshots list`, the restore picker and `--json` mark the snapshot, and `snapshots show` names the flags. A selection every source matches leaves nothing out, and its snapshot is recorded as full: marking it would send a restore of everything to an older snapshot for files this one holds. Two runs sharing a second share a snapshot, which is full if either run was and otherwise holds both selections.
 
-`merge_manifest` still exists for the case two runs land inside the same second and therefore share a name. rsync never deletes, so writing a manifest that named only the second run's groups would leave the first run's files on disk and unrestorable — and the manifest is the only record of what a snapshot holds.
+`merge_manifest` handles two runs that land inside the same second and therefore share a name. rsync never deletes, so writing a manifest that named only the second run's groups would leave the first run's files on disk and unrestorable — and the manifest is the only record of what a snapshot holds.
 
 ## Tags
 
@@ -334,7 +325,7 @@ safekeep restore --to PATH [--from DATE] [--all | --source PATH | --tag NAME]
 
 `--to` is required. `--to /` is a real restore; `--to ~/.cache/safekeep/rehearsal` stages one somewhere harmless, which is how the restore gets rehearsed before it is needed. That is the directory every printed rehearsal names, under `$XDG_CACHE_HOME` when it is set. It is a cache because deleting it costs nothing. It is the user's own because a fixed path under `/tmp` is shared with every account on the machine, which could create it first. A `~` in `--to` is expanded even where the shell left it alone, as zsh does after `--to=`.
 
-**A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. `--source` was `--group`, which is still accepted and no longer written anywhere: the manifest's groups are an implementation detail of how a repo's two file sets are recorded, and using that word in the output left "restored 39 groups" meaning nothing to the person who had just picked twenty-odd rows out of a picker.
+**A restore works in sources, not in groups.** A source is one config entry — a path, or one repo's untracked and ignored files together. The manifest's groups are an implementation detail of how a repo's two file sets are recorded. "restored 39 groups" means nothing to the person who has just picked twenty-odd rows out of a picker. `--group` is accepted as a hidden alias of `--source`.
 
 **A `--source` that is a path selects the source at it and every source beneath it.** `--source
 ~/code/app` is that repo, and leaves `~/code/app-api` out. A bare word is matched as a substring, so
@@ -400,7 +391,7 @@ The list is what rsync actually wrote, so files it skipped as identical are coun
 
 The mode pass prints a counter of its own, that being one `chmod` syscall per restored path and minutes of them over SMB. Redirected output gets every line above and none of the redrawn ones: a carriage return collapses a captured log into a single unreadable line, and a restore is exactly the thing run under `tee`.
 
-**The mode pass touches only what the snapshot holds.** It walks the snapshot's own subtree rather than the target's, applying each recorded deviation and applying the defaults only to paths this restore created. It used to walk the target, which for a repo is the entire working tree — so restoring two untracked files reported eleven thousand paths, and every tracked file got `0644` because the manifest had no mode for a file it had never seen. An executable that a `git clone` had just put back came out non-executable.
+**The mode pass touches only what the snapshot holds.** It walks the snapshot's own subtree rather than the target's, applying each recorded deviation and applying the defaults only to paths this restore created. The target, for a repo, is the entire working tree. A walk over it would report thousands of paths for a restore of two untracked files, and give every tracked file `0644`, because the manifest has no mode for a file it never saw. An executable that a `git clone` had just put back would come out non-executable.
 
 A `--dry-run` restore into a target that does not exist yet lists what it would create without calling rsync. rsync will not accept a file destination whose parent directory is missing, and a dry run is not allowed to create one — so for a rehearsal into a fresh directory there is no question left to ask it, since everything under the source would be created.
 
@@ -410,7 +401,7 @@ If the snapshot's home differs from the restoring machine's, paths under it are 
 
 **Every run is its own snapshot**: running twice produces two, and the second hard-links what did not change since the first. The previous snapshot is the previous *run*, which is what keeps a busy day cheap.
 
-**Fail fast**: If the destination doesn't exist or isn't writable, exit immediately.
+**Fail fast**: A destination that is not writable exits 1 before anything is copied. A missing destination is created. Where its nearest existing parent is not writable, the run exits 1 instead. `-n` makes the same check and creates nothing.
 
 **Every read takes `--json`**, which prints JSON to stdout, and a listing with no rows prints `[]`.
 An absent snapshot or source prints the reason on stderr and exits 1, with or without `--json`.

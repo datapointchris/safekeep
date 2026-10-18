@@ -110,9 +110,8 @@ SNAPSHOT_CHOICES_SHOWN = 5
 
 SINGLE_TAG_EXAMPLE = 'tags = ["wsl"]'
 
-# One snapshot per run, named for the second it started. The date half is still a plain date, so
-# a --from that names a day still selects, and every snapshot written before this change is still
-# found by the same pattern.
+# One snapshot per run, named for the second it started. The date half is a plain date, so a
+# --from that names a day selects, and a snapshot named for a day alone matches the same pattern.
 #
 # No colons, because the primary destination is SMB and NTFS forbids them in a filename. That
 # rules out strict ISO 8601, whose extended time separator is exactly what cannot be written --
@@ -481,9 +480,9 @@ def repo_entries(config):
 def normalize_entries(entries):
     """Normalize a list of [[back_up_paths]]/[[git.repos]] blocks into [(expanded_path, tags)].
 
-    Every entry is a table with 'path' and optional 'tags'. Under JSON an entry could also
-    be a bare string, which meant two shapes to write and two to parse; an array of tables
-    is uniform and gives every entry a line of its own to be commented on.
+    Every entry is a table with 'path' and optional 'tags', and a bare string is refused. An
+    array of tables gives every entry one shape to write and parse, and a line of its own to be
+    commented on.
     """
     normalized = []
     for entry in entries:
@@ -2567,13 +2566,12 @@ def require_known_selection(config, config_path, request: BackupRequest):
 def merge_manifest(existing, manifest):
     """This run's manifest folded into the one already in the snapshot.
 
-    Reached only when two runs land in the same second and therefore share a snapshot name. That
-    used to be every second run of a day, back when a snapshot was a day rather than a run.
+    Reached only when two runs land in the same second and therefore share a snapshot name.
 
-    It is kept rather than deleted because the failure it prevents is the worst one available:
-    rsync never deletes, so a second run's files land beside the first's, and writing a manifest
-    that names only the second run's groups would leave the rest on disk and unrestorable. The
-    manifest is the only record of what a snapshot holds.
+    The failure it prevents is the worst one available: rsync never deletes, so a second run's
+    files land beside the first's, and writing a manifest that names only the second run's groups
+    would leave the rest on disk and unrestorable. The manifest is the only record of what a
+    snapshot holds.
 
     The scalar keys take this run's value by ordinary dict-merge, which is also what carries
     'label' correctly: do_backup writes that key only when --label was typed, so an absent flag
