@@ -50,15 +50,15 @@ from pytermstyle import red
 from pytermstyle import yellow
 
 # Keys are phrases that state what safekeep will do, so the file reads as a description of the
-# backup rather than a dump of this program's variables -- see standards/configuration.md.
+# backup rather than a dump of this program's variables.
 REQUIRED_KEYS = {'back_up_to'}
 VALID_KEYS = {'back_up_to', 'back_up_paths', 'git', 'skip_names_matching', 'skip_files_over_mb'}
 # 'repos' names the subject of this block; every other key states what happens to it.
 VALID_REPO_KEYS = {'repos', 'back_up_untracked_files', 'back_up_ignored_files_matching'}
 
-# Keys that once meant something. A generic "unknown key" warning is fine for a typo but
-# useless for a key whose removal silently shrinks the backup, so retired keys carry their
-# own message. Entries are deleted once every config has aged past them.
+# Keys that once meant something, where ignoring one changes nothing about what is copied. An
+# unknown key warns and is ignored. A retired key warns and is ignored too, with a message of its
+# own, because "unrecognized key" reads as a typo.
 RETIRED_KEYS = {
     'keep': 'retention was removed — snapshots are no longer pruned; delete this key',
 }
