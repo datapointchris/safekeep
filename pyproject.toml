@@ -29,7 +29,7 @@ requires-python = ">=3.13"
 # 'pytermstyle' was already taken there.
 dependencies = [
     "pytermstyle",
-    "pyselfupdate[typer]>=0.5.0",
+    "pyselfupdate[typer]>=0.5.4",
     "typer>=0.16.0",
 ]
 
