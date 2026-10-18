@@ -414,9 +414,5 @@ shows stdout.
 
 ## See Also
 
-- [packup](https://datapointchris.github.io/dotfiles/apps/backup/) — timestamped tar+zstd
-  archives, the complementary tool
-- [Tool Composition](https://datapointchris.github.io/dotfiles/architecture/tool-composition/) —
-  how safekeep fits into the wider toolchain
 - [pytermstyle](https://github.com/datapointchris/pytermstyle) — the palette and row clipping of
   the command output
