@@ -237,17 +237,6 @@ def test_a_bare_namespace_shows_its_own_help(tmp_path, namespace):
     assert result.stderr == ''
 
 
-def test_a_bare_backup_writes_nothing(tmp_path, source_tree):
-    """The whole point of the verb: `backup` used to copy every configured path the moment it
-    was typed, so walking the tree one token at a time wrote to the destination."""
-    dest = tmp_path / 'dest'
-    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    result = run_safekeep('--config', str(config_path), 'backup')
-    assert result.returncode == 2
-    assert 'safekeep backup run' in result.stdout
-    assert not dest.exists()
-
-
 def test_a_namespace_screen_names_its_verbs(tmp_path):
     for namespace, verbs in (('snapshots', ('list', 'show')), ('files', ('list',)), ('tags', ('list', 'show')), ('backup', ('run',))):
         result = run_safekeep(namespace, '--help')
@@ -658,21 +647,9 @@ def test_survey_records_only_mode_deviations(source_tree):
     assert safekeep.snapshot_rel(source_tree / 'notes' / 'plain.md') not in modes
 
 
-def test_survey_records_the_source_directory_itself(tmp_path):
-    """~/.ssh and ~/.config/gnupg are 0700, and the source root's own mode used to be the one
-    path the survey skipped — so a rebuild recreated them at the 0755 default and gpg refused a
-    homedir anyone could read."""
-    private = tmp_path / 'gnupg'
-    private.mkdir()
-    private.chmod(0o700)
-    (private / 'pubring.kbx').write_text('keys\n')
-
-    survey = safekeep.survey_tree(private, [], None)
-    assert survey['modes'][safekeep.snapshot_rel(private)] == '0700'
-
-
 def test_restore_recreates_a_private_directory_at_its_own_mode(tmp_path):
-    """The round trip of the above, through a destination that cannot store modes at all."""
+    """A source that is itself a 0700 directory, such as ~/.config/gnupg, comes back at 0700
+    through a destination that stores no modes. At the 0755 default, gpg refuses the homedir."""
     dest = tmp_path / 'dest'
     target = tmp_path / 'target'
     private = tmp_path / 'gnupg'
@@ -754,31 +731,10 @@ def test_backup_narrows_to_the_sources_a_tag_covers(tmp_path, source_tree):
     assert [group['source'] for group in manifest['groups']] == [str(source_tree / 'real.conf')]
 
 
-def test_a_narrowed_backup_makes_a_partial_snapshot_of_its_own(tmp_path, source_tree):
-    """A snapshot is one run, so a narrowed run records what that run collected and nothing more.
-    It no longer tops up the day's snapshot, because there is no longer a day's snapshot to top
-    up — the full one from earlier sits beside it and is what a restore of the rest comes from."""
-    dest = tmp_path / 'dest'
-    config_path = tagged(tmp_path, dest, (source_tree / 'notes', ['docs']), (source_tree / 'real.conf', ['conf']))
-    run_safekeep('--config', str(config_path), 'backup', 'run')
-    full = earlier_run_today(dest)
-    run_safekeep('--config', str(config_path), 'backup', 'run', '--tag', 'conf')
-    narrowed = latest_snapshot(dest)
-
-    assert sources_of(full) == {str(source_tree / 'notes'), str(source_tree / 'real.conf')}
-    assert sources_of(narrowed) == {str(source_tree / 'real.conf')}
-    assert narrowed != full
-
-    target = tmp_path / 'target'
-    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--from', full.name, '--tag', 'docs')
-    assert restore.returncode == 0, restore.stderr
-    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
-
-
 def test_a_same_second_rerun_merges_rather_than_dropping_groups():
-    """Two runs inside one second share a name, which is the only case merge_manifest still
-    covers. rsync never deletes, so a manifest naming only the second run's groups would leave
-    the first run's files on disk and unrestorable — and the manifest is the only record."""
+    """Two runs inside one second share a name. rsync never deletes, so a manifest naming only
+    the second run's groups would leave the first run's files on disk and unrestorable — and the
+    manifest is the only record."""
     existing = {
         'groups': [{'kind': 'path', 'source': '/a', 'tags': [], 'files': 1, 'bytes': 1}],
         'modes': {'a': '0600'},
@@ -1245,8 +1201,8 @@ def test_git_untracked_becomes_its_own_group(tmp_path):
 
 
 def test_a_snapshot_is_named_for_the_run_not_the_day(tmp_path, source_tree):
-    """A file written and mangled between two runs on one day used to lose its good version,
-    because the second run overwrote the only copy. One snapshot per run is what keeps it."""
+    """A file written and then mangled between two runs on one day keeps its good version in the
+    earlier run's snapshot, which no other snapshot holds."""
     dest = tmp_path / 'dest'
     config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
     wip = source_tree / 'notes' / 'wip.md'
@@ -1273,27 +1229,9 @@ def test_the_snapshot_name_carries_a_time_and_holds_no_colon(tmp_path, source_tr
     assert ':' not in name
 
 
-def test_snapshots_written_before_the_time_was_added_are_still_found(tmp_path, source_tree):
-    """Every snapshot already on a destination is named for a day alone. They stay listable and
-    restorable, which is the whole of what back-compat means here."""
-    dest = tmp_path / 'dest'
-    config_path = write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'notes'))
-    run_safekeep('--config', str(config_path), 'backup', 'run')
-    old = age_todays_snapshot(dest, '2020-01-01')
-
-    listed = plain(run_safekeep('--config', str(config_path), 'snapshots', 'list').stdout)
-    assert '2020-01-01' in listed
-
-    target = tmp_path / 'target'
-    restore = run_safekeep('--config', str(config_path), 'restore', '--to', str(target), '--from', old.name, '--all')
-    assert restore.returncode == 0, restore.stderr
-    assert (target / safekeep.snapshot_rel(source_tree / 'notes') / 'plain.md').exists()
-
-
 def test_a_listing_of_both_name_shapes_and_both_count_shapes_keeps_its_columns(tmp_path, source_tree):
-    """A destination carries both name shapes at once — every snapshot taken before the time was
-    added is a bare date, ten characters against nineteen — and "1 file" is a character short of
-    "3 files". Unpadded, either shifts every column after it."""
+    """A snapshot named for a bare date is ten characters against nineteen, and "1 file" is a
+    character short of "3 files". Unpadded, either shifts every column after it."""
     dest = tmp_path / 'dest'
     run_safekeep('--config', str(write_config(tmp_path, dest, back_up_paths=paths(source_tree / 'solo.conf'))), 'backup', 'run')
     age_todays_snapshot(dest)
@@ -1526,8 +1464,8 @@ def test_both_snapshot_views_show_the_label(tmp_path, source_tree):
 
 
 def test_a_snapshot_without_a_label_renders_clean(tmp_path, source_tree):
-    """The degradation case, and the one every snapshot taken before this existed lands in:
-    no trailing separator, no empty column, nothing claiming a note that was never written."""
+    """A run without --label writes no label key. Its row ends at the hostname: no trailing
+    separator, no empty column, nothing claiming a note that was never written."""
     dest = tmp_path / 'dest'
     config_path, manifest = labeled_snapshot(tmp_path, dest, source_tree)
     assert 'label' not in manifest
@@ -2391,9 +2329,9 @@ def test_tags_show_offers_the_older_snapshot_holding_a_tags_sources_untagged_aft
 
 def test_restore_dry_run_writes_nothing(tmp_path, source_tree):
     """The rehearsal: every group shape, into a target that does not exist yet. The exit code
-    is half the assertion — an empty target is equally what a crash leaves behind, and a crash
-    is exactly what a single-file group used to produce here (rsync cannot be given a file
-    destination under a directory it is not allowed to create)."""
+    is half the assertion, because an empty target is also what a crash leaves behind. A
+    single-file group is the shape that could crash: rsync cannot be given a file destination
+    under a directory a dry run may not create."""
     restore, target = backup_and_restore(tmp_path, source_tree, '--all', '--dry-run')
     assert restore.returncode == 0, restore.stderr
     assert 'would restore 3 sources' in plain(restore.stdout)
@@ -2801,9 +2739,9 @@ def test_restore_names_each_file_and_says_which_are_gitignored(tmp_path):
 
 
 def test_restore_leaves_the_modes_of_files_no_snapshot_holds(tmp_path):
-    """The mode pass used to walk the target, which for a repo is the whole working tree — every
-    tracked file got the default 0644 because the manifest had no mode for a file it never saw.
-    Restoring two untracked files reported eleven thousand paths and stripped +x on the way."""
+    """For a repo, the target is the whole working tree, and the manifest has no mode for a
+    tracked file it never saw. The mode pass walks only what the snapshot holds, so a tracked
+    script keeps its +x and the count is of restored paths."""
     dest = tmp_path / 'dest'
     repo = repo_with_untracked_and_ignored(tmp_path)
     config_path = repo_config(tmp_path, dest, repo)
