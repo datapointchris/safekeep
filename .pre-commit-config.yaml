@@ -1,4 +1,4 @@
-# forge-toolchain: 47
+# forge-toolchain: 48
 fail_fast: true
 default_stages: [pre-commit]
 repos:
@@ -200,10 +200,16 @@ repos:
       - id: uv-lock
 
   # Python: formatting
+  #
+  # types_or leaves out markdown, which ruff-pre-commit's ruff-format selects.
+  # ruff formats a Python fence in Markdown as source, and a fence here is often
+  # a figure: aligned comments and right-aligned paths, which the reflow
+  # destroys.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.1
     hooks:
       - id: ruff-format
+        types_or: [python, pyi, jupyter]
 
 # generated:python-lint - Python: linting
   - repo: https://github.com/astral-sh/ruff-pre-commit
