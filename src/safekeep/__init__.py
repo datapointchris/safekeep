@@ -1099,8 +1099,8 @@ def show_snapshot_list(dest, config_path, as_json=False):
         # Free text of any length, so it goes last and is clipped against the columns before it:
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
         # one of them is not at the left. On a terminal only, because a redirected run has no
-        # width to fit and loses data if one is assumed. clip measures
-        # uncolored text, which is what `cells` is for.
+        # width to fit and loses data if one is assumed. clip measures uncolored text, which is
+        # what `cells` is for.
         if summary['label']:
             row += '  ' + green(clip_to_terminal(summary['label'], len(cells) + 4))
         print(row)

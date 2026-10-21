@@ -20,11 +20,9 @@ classifiers = [
 # The only caller is the person running it, and uv fetches a matching interpreter.
 requires-python = ">=3.13"
 
-# typer owns the command tree, and rich renders its help. pytermstyle colors the
-# command output and clips rows to the terminal, so a run reads like the shell
-# tools beside it. pyselfupdate is the notify-only self-update, and its [typer]
-# extra is the `update` command's reporting. The copying is rsync and the config
-# is read with stdlib tomllib.
+# pyselfupdate's [typer] extra is what the `update` command reports through.
+# The copying is rsync and the config is read with stdlib tomllib, so neither
+# needs a package here.
 # pyselfupdate resolves from PyPI and pytermstyle from git, purely because
 # 'pytermstyle' was already taken there.
 dependencies = [
