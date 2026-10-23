@@ -1,4 +1,4 @@
-# forge-toolchain: 49
+# forge-toolchain: 52
 fail_fast: true
 default_stages: [pre-commit]
 repos:
@@ -244,8 +244,8 @@ repos:
         pass_filenames: false
 
 # generated:github-actions - GitHub Actions
-  - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.7
+  - repo: https://github.com/jdx/jactionlint
+    rev: v1.8.2
     hooks:
-      - id: actionlint
+      - id: jactionlint
         args: ["-color", "-shellcheck="]
