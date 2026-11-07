@@ -1462,8 +1462,7 @@ def test_both_snapshot_views_show_the_label(tmp_path, source_tree):
 
 
 def test_a_snapshot_without_a_label_renders_clean(tmp_path, source_tree):
-    """A run without --label writes no label key. Its row ends at the hostname: no trailing
-    separator, no empty column, nothing claiming a note that was never written."""
+    """No trailing separator, no empty column, nothing claiming a note that was never written."""
     dest = tmp_path / 'dest'
     config_path, manifest = labeled_snapshot(tmp_path, dest, source_tree)
     assert 'label' not in manifest

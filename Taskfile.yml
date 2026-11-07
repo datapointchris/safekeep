@@ -7,8 +7,6 @@ tasks:
     cmds:
       - task --list
 
-  # A worktree is a clean checkout, so everything gitignored is absent. The
-  # virtualenv comes back from uv.lock.
   setup:
     desc: Make a fresh checkout runnable
     cmds:

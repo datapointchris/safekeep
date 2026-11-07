@@ -731,8 +731,8 @@ def link_dest_flags(link_dest):
     stays affordable — which is the policy, snapshots are never pruned. Absolute, because rsync
     resolves a relative --link-dest against the destination directory and the two are siblings.
 
-    An rsync whose help does not list --link-dest gets no flag. Its snapshot is a full copy,
-    identical in content and restorable by the same code.
+    Without the option, the snapshot is a full copy, identical in content and restorable by the
+    same code.
     """
     if link_dest is None or not rsync_supports('--link-dest'):
         return []
@@ -822,9 +822,7 @@ def run_backup_rsync(cmd):
 
 @cache
 def rsync_help():
-    """The help text of the rsync on PATH, read once per run.
-
-    rsync builds differ in which options they take. An optional flag is passed only where this
+    """rsync builds differ in which options they take. An optional flag is passed only where this
     text names it, so an rsync that lacks one still completes the run without it.
     """
     probe = subprocess.run(['rsync', '--help'], capture_output=True, text=True)
