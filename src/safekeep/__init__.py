@@ -2711,7 +2711,8 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
             filtered = [f for f in untracked if not matches_exclude(str(f), excludes)]
             survey = survey_files(filtered, max_size_mb)
             merge_survey(manifest, survey)
-            copyable = [f for f in filtered if snapshot_rel(f) not in {s['path'].lstrip('/') for s in survey['skipped_large']}]
+            skipped = {snapshot_rel(s['path']) for s in survey['skipped_large']}
+            copyable = [f for f in filtered if snapshot_rel(f) not in skipped]
             manifest['groups'].append(
                 {
                     'kind': Kind.GIT_UNTRACKED,
@@ -2739,7 +2740,8 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                 continue
             survey = survey_files(filtered, max_size_mb)
             merge_survey(manifest, survey)
-            copyable = [f for f in filtered if snapshot_rel(f) not in {s['path'].lstrip('/') for s in survey['skipped_large']}]
+            skipped = {snapshot_rel(s['path']) for s in survey['skipped_large']}
+            copyable = [f for f in filtered if snapshot_rel(f) not in skipped]
             manifest['groups'].append(
                 {
                     'kind': Kind.GIT_IGNORED,
