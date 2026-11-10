@@ -124,10 +124,19 @@ MANIFEST_NAME = '.safekeep-manifest.json'
 # the file it just wrote was gitignored rather than untracked.
 MANIFEST_VERSION = 2
 
+
+class Kind(StrEnum):
+    """The `kind` of a manifest group: what part of a source it collected."""
+
+    PATH = 'path'
+    GIT_UNTRACKED = 'git_untracked'
+    GIT_IGNORED = 'git_ignored'
+
+
 # What each kind of group contributes, in words rather than in the manifest's key names. A git
 # repo's line otherwise reads as though the repo itself is being restored -- which is the one
 # thing a snapshot never holds, since a clone puts everything else back.
-KIND_LABELS = {'path': 'path', 'git_untracked': 'untracked', 'git_ignored': 'ignored'}
+KIND_LABELS = {Kind.PATH: 'path', Kind.GIT_UNTRACKED: 'untracked', Kind.GIT_IGNORED: 'ignored'}
 
 PRE_RESTORE_SUFFIX = '.pre-restore'
 
@@ -1193,7 +1202,7 @@ def snapshot_sources(manifest):
     sources = {}
     for group in manifest.get('groups', []):
         source = remap_home(group['source'], manifest_home, target_home)
-        kind = 'path' if group['kind'] == 'path' else 'git repo'
+        kind = 'path' if group['kind'] == Kind.PATH else 'git repo'
         stored = sources.setdefault(source, {'kind': kind, 'tags': [], 'files': 0, 'bytes': 0})
         stored['tags'] += [tag for tag in group.get('tags', []) if tag not in stored['tags']]
         stored['files'] += group.get('files', 0)
@@ -1964,10 +1973,14 @@ def ask_about_conflicts(conflicts, decision):
                 decision['all'] = True
             elif answer == 'k':
                 decision['all'] = False
+            elif answer == 'y':
+                continue
             elif answer == 'n':
                 declined.add(str(entry['origin']))
                 continue
             else:
+                # An answer not named above keeps the file, the answer that loses nothing.
+                declined.add(str(entry['origin']))
                 continue
         if not decision['all']:
             declined.add(str(entry['origin']))
@@ -2680,7 +2693,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
             survey = survey_tree(path, excludes, max_size_mb)
             merge_survey(manifest, survey)
             manifest['groups'].append(
-                {'kind': 'path', 'source': str(path), 'tags': tags, 'files': survey['files'], 'bytes': survey['bytes']}
+                {'kind': Kind.PATH, 'source': str(path), 'tags': tags, 'files': survey['files'], 'bytes': survey['bytes']}
             )
             present.append(path)
         copied = rsync_paths(present, dest_base, excludes, request.dry_run, max_size_mb, link_dest)
@@ -2701,7 +2714,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
             copyable = [f for f in filtered if snapshot_rel(f) not in {s['path'].lstrip('/') for s in survey['skipped_large']}]
             manifest['groups'].append(
                 {
-                    'kind': 'git_untracked',
+                    'kind': Kind.GIT_UNTRACKED,
                     'source': str(repo_path),
                     'tags': tags,
                     'files': survey['files'],
@@ -2729,7 +2742,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
             copyable = [f for f in filtered if snapshot_rel(f) not in {s['path'].lstrip('/') for s in survey['skipped_large']}]
             manifest['groups'].append(
                 {
-                    'kind': 'git_ignored',
+                    'kind': Kind.GIT_IGNORED,
                     'source': str(repo_path),
                     'tags': tags,
                     'files': survey['files'],
