@@ -2032,11 +2032,9 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
         print(f'      {restore_file_line(name, entry, kind, request.on_conflict)}')
 
     cmd = ['rsync', '-a']
-    if request.on_conflict == ConflictPolicy.SKIP:
-        cmd.append('--ignore-existing')
-    elif request.on_conflict == ConflictPolicy.NEWER:
+    if request.on_conflict == ConflictPolicy.NEWER:
         cmd.append('--update')
-    else:
+    elif request.on_conflict in (ConflictPolicy.BACKUP, ConflictPolicy.OVERWRITE, ConflictPolicy.ASK):
         # backup, overwrite and an answered ask all mean the snapshot wins, so the quick check
         # has to go. rsync skips a file with the same size and mtime without ever reading it,
         # which is right for a sync and wrong for a restore: a file corrupted in place keeps
@@ -2046,6 +2044,12 @@ def restore_source(snapshot_dir, row, target_root, manifest_home, target_home, s
         cmd.append('--checksum')
         if request.on_conflict == ConflictPolicy.BACKUP:
             cmd.extend(['--backup', f'--suffix={PRE_RESTORE_SUFFIX}'])
+    elif request.on_conflict == ConflictPolicy.SKIP:
+        cmd.append('--ignore-existing')
+    else:
+        # A policy not named above leaves every file already at the target alone, because the
+        # answer that cannot lose anything is the one to fall back on.
+        cmd.append('--ignore-existing')
 
     if request.skip_symlinked and stored.is_dir():
         for abs_path in symlinked:
