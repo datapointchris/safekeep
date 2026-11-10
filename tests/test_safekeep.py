@@ -1808,11 +1808,13 @@ def test_tags_json_sizes_each_tag_against_the_snapshot_it_names(tmp_path, source
 
 
 def test_config_show_json_is_the_config_as_resolved(tmp_path, source_tree):
-    config_path = write_config(tmp_path, tmp_path / 'dest', back_up_paths=paths(source_tree / 'notes'), surprise=1)
+    config_path = write_config(tmp_path, tmp_path / 'dest', back_up_paths=paths(source_tree / 'notes'), skip_files_over_mb=5, surprise=1)
     shown = read_json(config_path, 'config', 'show')
     assert shown['back_up_paths'] == [{'path': str(source_tree / 'notes'), 'tags': []}]
     assert shown['git']['back_up_untracked_files'] is True
     assert shown['skip_names_matching'] == safekeep.DEFAULT_SKIP_NAMES
+    assert shown['skip_files_over_mb'] == 5
+    assert shown['defaulted'] == ['skip_names_matching', 'git.back_up_untracked_files', 'git.back_up_ignored_files_matching']
     assert shown['warnings'] == ['surprise: unrecognized key, ignored']
 
 

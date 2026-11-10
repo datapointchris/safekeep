@@ -2876,8 +2876,21 @@ def edit_config(config_path):
         print(f'  {yellow("config warning:")} {warning}')
 
 
+def defaulted_keys(config):
+    """The settings the config file left out, whose values come from safekeep's own defaults.
+
+    Dotted the way the TOML nests them. A default reads the same as a value written in the file,
+    so this is what says which of the two a shown value is.
+    """
+    git = config.get('git', {})
+    top = [key for key in ('skip_names_matching', 'skip_files_over_mb') if key not in config]
+    nested = [f'git.{key}' for key in ('back_up_untracked_files', 'back_up_ignored_files_matching') if key not in git]
+    return top + nested
+
+
 def show_config(config_path, config, warnings, as_json=False):
-    """Display the resolved config with readable formatting."""
+    """Display the resolved config with readable formatting, marking each value a default supplied."""
+    defaulted = defaulted_keys(config)
     if as_json:
         repos, back_up_untracked, ignored_patterns = repo_entries(config)
         print_json(
@@ -2892,10 +2905,14 @@ def show_config(config_path, config, warnings, as_json=False):
                 },
                 'skip_names_matching': config.get('skip_names_matching', DEFAULT_SKIP_NAMES),
                 'skip_files_over_mb': config.get('skip_files_over_mb'),
+                'defaulted': defaulted,
                 'warnings': warnings,
             }
         )
         return
+
+    def default_mark(key):
+        return f'  {yellow("(default)")}' if key in defaulted else ''
 
     print(f'{bold("safekeep:")} {cyan(str(config_path))}')
     print()
@@ -2916,7 +2933,7 @@ def show_config(config_path, config, warnings, as_json=False):
             suffix = f'  [{", ".join(tags)}]' if tags else ''
             print(f'    {path}{suffix}')
         untracked_label = green('back up') if back_up_untracked else yellow('do not back up')
-        print(f'    {untracked_label} untracked files')
+        print(f'    {untracked_label} untracked files{default_mark("git.back_up_untracked_files")}')
         if ignored_patterns:
             print(f'    {green("back up")} ignored files matching {", ".join(ignored_patterns)}')
 
@@ -2924,10 +2941,10 @@ def show_config(config_path, config, warnings, as_json=False):
         print(f'\n  {yellow("nothing to back up: no back_up_paths, no git.repos")}')
 
     excludes = config.get('skip_names_matching', DEFAULT_SKIP_NAMES)
-    print(f'\n  {bold("skip names matching:")} {", ".join(excludes)}')
+    print(f'\n  {bold("skip names matching:")} {", ".join(excludes)}{default_mark("skip_names_matching")}')
     max_size_mb = config.get('skip_files_over_mb')
-    if max_size_mb is not None:
-        print(f'  {bold("skip files over:")} {max_size_mb} MB')
+    size_limit = 'no limit' if max_size_mb is None else f'{max_size_mb} MB'
+    print(f'  {bold("skip files over:")} {size_limit}{default_mark("skip_files_over_mb")}')
 
     if warnings:
         print()
