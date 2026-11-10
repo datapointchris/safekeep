@@ -2272,6 +2272,18 @@ def can_prompt(no_input: bool):
 
 
 def do_restore(config, config_path, request: RestoreRequest):
+    """Copy the selected sources of one snapshot back to `request.to`, then put back their modes.
+
+    The snapshot is `request.from_date`, the newest restorable one, or the one picked in fzf on a
+    terminal with no selection. Sources come from the manifest, never the config, and a path under
+    the snapshot's home lands under this machine's. Each source prints a line before it is copied
+    and a line per file as rsync writes it. The run ends with notes on paths that were symlinks
+    when backed up, and with the restores that bring back what a narrowed snapshot lacks.
+
+    Exits 2 when `--on-conflict ask` cannot prompt. Exits 1 when no snapshot is restorable, the
+    manifest cannot be read, the selection cannot be asked for, or an explicit selection matches
+    nothing. A quit at the conflict prompt keeps the sources already restored and ends normally.
+    """
     dest = Path(config['back_up_to']).expanduser()
 
     if request.on_conflict == ConflictPolicy.ASK and not can_prompt(request.no_input):
@@ -2611,6 +2623,17 @@ def merge_manifest(existing, manifest):
 
 
 def do_backup(config, config_path, warnings, request: BackupRequest):
+    """Copy the config's sources, or the ones `--tag` and `--source` select, into a new snapshot.
+
+    The snapshot is a directory under `back_up_to` named for the second the run started, and its
+    manifest records what a restore needs without the config: sources, tags, kinds, modes,
+    symlinks and the home it was taken under. Unchanged files are hard-linked to the previous
+    snapshot where rsync and the destination allow it. A second run in the same second merges into
+    the same snapshot. A dry run surveys and prints the same report, and writes nothing.
+
+    Exits 2 when a selection names nothing the config holds. Exits 1 when the destination cannot
+    be written or created, or when rsync fails with anything but a partial transfer, which warns.
+    """
     print(f'{bold("safekeep:")} using config {cyan(config_handle(config_path))}', flush=True)
     narrowed_to = None
     if request.tag or request.source:
