@@ -88,12 +88,8 @@ Every read takes `--json`. Errors go to stderr, prefixed `safekeep:`, and a miss
 error exits 2. Every command safekeep prints in a hint runs as printed, with `-c` added where there
 are several configs.
 
-The root help groups the commands in the order a backup is used:
-
-- **Back up** — `backup`. The only command that writes to the destination.
-- **Read** — `snapshots`, `files`, `tags`. Each reads the destination, and none writes.
-- **Restore** — `restore`. Writes under `--to`, and reads one snapshot.
-- **Manage** — `config`, `update`.
+`safekeep --help` groups the commands in the order a backup is used. `backup run` is the only
+command that writes to the destination.
 
 ## Which surface answers which question
 
