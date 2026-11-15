@@ -34,6 +34,16 @@ safekeep update --check                                                  # wheth
 Name the index on the install: without it uv asks PyPI, where `safekeep` is a different project.
 uv records the index beside the tool, which is where `safekeep update` reads it back.
 
+Without access to that index, install from the source. uv takes pytermstyle from its pinned git tag
+and every other dependency from PyPI:
+
+```bash
+uv tool install git+https://github.com/datapointchris/safekeep   # the latest commit on main
+uv tool install .                                               # from a checkout of this repository
+```
+
+Upgrade such an install by running the same command again with `--reinstall`.
+
 `safekeep update` installs the newest release over the running one. It refuses an install from the
 default branch, because a branch carries no release version to compare. Every other command checks
 for a newer release at most once a day, and names one it finds in a line on stderr.
