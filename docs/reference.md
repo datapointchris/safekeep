@@ -54,33 +54,7 @@ Config files live in `$XDG_CONFIG_HOME/safekeep/`, which is `~/.config/safekeep/
 
 `-c` also takes a path to a `.toml` file anywhere. That is the route on a new machine that has only the backup drive: a config holding nothing but `back_up_to` reads every snapshot on it and restores any of them. Pointing `-c` at the snapshot directory itself is an error that says so.
 
-`safekeep config init` writes a complete annotated starter config, and `safekeep config example` prints the same content to stdout without touching the filesystem — which is what you want when the question is "what does that key look like" rather than "set me up". The shape it produces:
-
-```toml
-back_up_to = "/mnt/h/backups"
-skip_names_matching = [".venv", "node_modules", "*.pyc"]
-skip_files_over_mb = 50
-
-[[back_up_paths]]
-path = "~/.ssh"
-tags = ["secrets", "rebuild"]
-
-[[back_up_paths]]
-path = "~/notes"
-tags = ["notes"]
-
-[git]
-back_up_untracked_files = true
-back_up_ignored_files_matching = ["CLAUDE.md", "*.env"]
-
-[[git.repos]]
-path = "~/dotfiles"
-tags = ["rebuild"]
-
-[[git.repos]]
-path = "~/code/side-project"
-tags = ["wip"]
-```
+`safekeep config init` writes a complete annotated starter config, and `safekeep config example` prints the same content to stdout without touching the filesystem — which is what you want when the question is "what does that key look like" rather than "set me up". Run `safekeep config example` to see the shape it produces, with every key annotated.
 
 **Every key states what safekeep will do, so the file reads as a description of the backup rather than a list of this program's variables.**
 
