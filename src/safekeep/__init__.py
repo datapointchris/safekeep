@@ -533,7 +533,11 @@ def git_env():
 
 
 def git_ls_untracked(repo_path):
-    """Get list of untracked files from a git repository."""
+    """The untracked files in a git repository, or None when git cannot list them.
+
+    None rather than an empty list, so a directory that is not a repo is not recorded as a repo
+    with nothing untracked.
+    """
     try:
         result = subprocess.run(
             ['git', 'ls-files', '--others', '--exclude-standard'],
@@ -546,7 +550,7 @@ def git_ls_untracked(repo_path):
         return [repo_path / line for line in result.stdout.strip().splitlines() if line]
     except (subprocess.CalledProcessError, FileNotFoundError):
         print(f'  {yellow("warning:")} could not list untracked files in {cyan(str(repo_path))}')
-        return []
+        return None
 
 
 def git_ls_ignored(repo_path, patterns):
@@ -2731,6 +2735,8 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
                 print(f'  {yellow("skip:")} {yellow(str(repo_path))} (not found)')
                 continue
             untracked = git_ls_untracked(repo_path)
+            if untracked is None:
+                continue
             filtered = [f for f in untracked if not matches_exclude(str(f), excludes)]
             survey = survey_files(filtered, max_size_mb)
             merge_survey(manifest, survey)

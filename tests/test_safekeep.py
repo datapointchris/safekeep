@@ -882,6 +882,10 @@ def test_backup_warns_when_a_listed_repo_is_not_a_git_repo(tmp_path, source_tree
     assert result.returncode == 0, result.stderr
     assert 'could not list untracked files' in plain(result.stdout)
 
+    snapshot = next(d for d in dest.iterdir() if d.is_dir())
+    manifest = json.loads((snapshot / safekeep.MANIFEST_NAME).read_text())
+    assert [group for group in manifest['groups'] if group['kind'] == safekeep.Kind.GIT_UNTRACKED] == []
+
 
 def test_backup_names_every_file_it_skipped_for_size(tmp_path, source_tree):
     """A short backup is never silently short: the oversized file stays out of the snapshot and
