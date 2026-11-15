@@ -41,6 +41,8 @@ from importlib.metadata import version as installed_version
 from itertools import chain
 from itertools import product
 from pathlib import Path
+from typing import Any
+from typing import NoReturn
 
 from pytermstyle import bold
 from pytermstyle import clip
@@ -636,7 +638,7 @@ def survey_tree(root, excludes, max_size_mb):
     Follows symlinked directories because the backup dereferences them (rsync -L), and
     tracks resolved directories to keep a symlink cycle from hanging the walk.
     """
-    survey = {'files': 0, 'bytes': 0, 'modes': {}, 'symlinks': {}, 'skipped_large': []}
+    survey: dict[str, Any] = {'files': 0, 'bytes': 0, 'modes': {}, 'symlinks': {}, 'skipped_large': []}
 
     if root.is_symlink():
         survey['symlinks'][snapshot_rel(root)] = os.readlink(root)
@@ -688,7 +690,7 @@ def survey_tree(root, excludes, max_size_mb):
 
 def survey_files(files, max_size_mb):
     """Stat an explicit file list (git-derived) into a survey."""
-    survey = {'files': 0, 'bytes': 0, 'modes': {}, 'symlinks': {}, 'skipped_large': []}
+    survey: dict[str, Any] = {'files': 0, 'bytes': 0, 'modes': {}, 'symlinks': {}, 'skipped_large': []}
     for path in files:
         if path.is_symlink():
             survey['symlinks'][snapshot_rel(path)] = os.readlink(path)
@@ -911,6 +913,7 @@ def check_rsync(cmd, returncode):
 def run_rsync_naming_files(cmd, report):
     """Run rsync, handing `report` each path as rsync writes it."""
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+    assert process.stdout is not None
     for line in process.stdout:
         name = rsync_named_file(line.rstrip('\n'))
         if name is not None:
@@ -971,7 +974,7 @@ def unreadable_reason(dest, wanted, snapshot_dir, config_path):
     return f'snapshot {snapshot_dir.name} has no manifest, so safekeep can neither read nor restore it'
 
 
-def fail_unreadable(dest, wanted, snapshot_dir, config_path):
+def fail_unreadable(dest, wanted, snapshot_dir, config_path) -> NoReturn:
     print(f'{red("safekeep:")} {unreadable_reason(dest, wanted, snapshot_dir, config_path)}', file=sys.stderr)
     sys.exit(1)
 
@@ -1007,7 +1010,7 @@ def source_rows(groups):
     Sorted by path because that is the order the eye can scan a picker of thirty sources in —
     manifest order is config order, which is only meaningful to whoever wrote the config.
     """
-    rows = {}
+    rows: dict[str, dict[str, Any]] = {}
     for group in groups:
         row = rows.setdefault(group['source'], {'source': group['source'], 'kinds': [], 'tags': [], 'files': 0, 'bytes': 0})
         if group['kind'] not in row['kinds']:
@@ -1203,7 +1206,7 @@ def snapshot_sources(manifest):
         return {}
     manifest_home = manifest.get('home')
     target_home = str(Path.home())
-    sources = {}
+    sources: dict[str, dict[str, Any]] = {}
     for group in manifest.get('groups', []):
         source = remap_home(group['source'], manifest_home, target_home)
         kind = 'path' if group['kind'] == Kind.PATH else 'git repo'
@@ -1228,7 +1231,7 @@ def tag_index(config, sources):
     source is not in the snapshot at all. A source the snapshot holds without the tag is noted
     TAGGED_IN_CONFIG_ONLY, since a restore selects on the snapshot's tags and skips it.
     """
-    index = {}
+    index: dict[str, list] = {}
     entries = {str(path): (kind, tags) for kind, path, tags in config_entries(config)}
 
     for source in sorted(set(entries) | set(sources)):
@@ -1448,7 +1451,7 @@ def newest_copies(snapshots, progress):
     verdict would call a partly read snapshot clean.
     """
     copies = {}
-    unreadable = []
+    unreadable: list[str] = []
     read = 0
     for position, (snapshot_dir, manifest) in enumerate(snapshots, start=1):
         for path, recorded, stored in snapshot_files(snapshot_dir, manifest, unreadable):
@@ -1774,7 +1777,7 @@ def rows_inside_sources(snapshot_dir, manifest, needles):
     """
     home_then = manifest.get('home')
     home_now = str(Path.home())
-    rows = {}
+    rows: dict[str, dict[str, Any]] = {}
     for needle in needles:
         wanted = normalized_needle(needle)
         if not os.path.isabs(wanted):

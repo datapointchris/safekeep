@@ -23,6 +23,7 @@ import tempfile
 import time
 from itertools import chain
 from pathlib import Path
+from typing import Any
 
 import pytest
 import tomli_w
@@ -1276,7 +1277,7 @@ def test_the_snapshot_picker_hides_a_typeable_name_behind_its_columns(tmp_path, 
     wanted = latest_snapshot(dest).name
     shutil.copytree(dest / wanted, dest / '2020-01-01')
 
-    captured = {}
+    captured: dict[str, Any] = {}
 
     def fake_fzf(lines, args):
         captured.update(lines=lines, args=args)
@@ -2069,7 +2070,7 @@ def test_a_selection_every_source_matches_writes_a_full_snapshot(tmp_path, sourc
 
 def test_two_runs_sharing_a_second_hold_everything_if_either_was_full():
     """`backup run && backup run --tag secrets` inside one second writes one snapshot holding both."""
-    full = {'groups': [], 'modes': {}, 'symlinks': {}, 'skipped_large': [], 'narrowed_to': None}
+    full: dict[str, Any] = {'groups': [], 'modes': {}, 'symlinks': {}, 'skipped_large': [], 'narrowed_to': None}
     secrets = full | {'narrowed_to': {'tags': ['secrets'], 'sources': []}}
     notes = full | {'narrowed_to': {'tags': [], 'sources': ['notes']}}
     assert safekeep.merge_manifest(full, secrets)['narrowed_to'] is None
@@ -2095,7 +2096,7 @@ def test_every_listing_of_snapshots_marks_the_narrowed_one(tmp_path, source_tree
     shown = run_safekeep('--config', str(config_path), 'snapshots', 'show', narrowed)
     assert 'narrowed to: --tag secrets, so it holds only the sources that matched' in shown.stdout
 
-    captured = {}
+    captured: dict[str, Any] = {}
 
     def fake_fzf(lines, args):
         captured['lines'] = [line.split('\t') for line in lines]
@@ -2311,7 +2312,7 @@ def test_tags_show_offers_the_older_snapshot_that_carries_a_tag_a_narrowed_run_l
 def test_tags_show_offers_the_older_snapshot_holding_a_tags_sources_untagged_after_a_narrowed_run(tmp_path, source_tree):
     """The tag was added after the full snapshot, then a narrowed run left the source out."""
     dest = tmp_path / 'dest'
-    untagged = [{'path': str(source_tree / 'notes')}, {'path': str(source_tree / 'solo.conf'), 'tags': ['secrets']}]
+    untagged: list[dict[str, Any]] = [{'path': str(source_tree / 'notes')}, {'path': str(source_tree / 'solo.conf'), 'tags': ['secrets']}]
     run_safekeep('--config', str(write_config(tmp_path, dest, back_up_paths=untagged)), 'backup', 'run')
     full = age_todays_snapshot(dest).name
     config_path = write_config(tmp_path, dest, back_up_paths=[untagged[0] | {'tags': ['notes']}, untagged[1]])
