@@ -942,12 +942,21 @@ def read_manifest(snapshot_dir):
         return None
 
 
-def list_snapshots(dest):
-    """List snapshot directories at dest, newest first, paired with manifests."""
+def snapshot_dirs(dest):
+    """The snapshot directories at dest, newest first, without reading any manifest.
+
+    For a caller that needs only names, such as resolving one snapshot, because a manifest can
+    be large and a destination holds every snapshot ever taken.
+    """
     if not dest.exists():
         return []
     dated = [d for d in dest.iterdir() if d.is_dir() and SNAPSHOT_NAME.fullmatch(d.name)]
-    return [(d, read_manifest(d)) for d in sorted(dated, key=lambda d: d.name, reverse=True)]
+    return sorted(dated, key=lambda d: d.name, reverse=True)
+
+
+def list_snapshots(dest):
+    """List snapshot directories at dest, newest first, paired with manifests."""
+    return [(d, read_manifest(d)) for d in snapshot_dirs(dest)]
 
 
 def resolve_snapshot(dest, wanted):
@@ -958,14 +967,14 @@ def resolve_snapshot(dest, wanted):
     caller prints the name it resolved to rather than what was typed, because a prefix that
     matched something unintended is only visible if the answer says which snapshot it picked.
     """
-    snapshots = [d for d, _ in list_snapshots(dest)]
+    snapshots = snapshot_dirs(dest)
     exact = [d for d in snapshots if d.name == wanted]
     return exact[0] if exact else next((d for d in snapshots if d.name.startswith(wanted)), None)
 
 
 def snapshot_choices(dest, config_path):
     """The snapshots an error asking for one can offer, newest first, as plain text lines."""
-    names = [snapshot_dir.name for snapshot_dir, _ in list_snapshots(dest)]
+    names = [snapshot_dir.name for snapshot_dir in snapshot_dirs(dest)]
     command = safekeep_for(config_path)
     if not names:
         return f'No snapshots at {dest} yet. Take one: {command} backup run'
@@ -995,7 +1004,7 @@ def previous_snapshot(dest, snapshot_name):
     exist yet, but two runs inside one second share a name -- and linking a tree against itself
     is both meaningless and a way to lose the freshly-copied version of a file that changed.
     """
-    for snapshot_dir, _ in list_snapshots(dest):
+    for snapshot_dir in snapshot_dirs(dest):
         if snapshot_dir.name != snapshot_name:
             return snapshot_dir
     return None
@@ -2317,12 +2326,12 @@ def do_restore(config, config_path, request: RestoreRequest):
             print(f'{yellow("safekeep:")} nothing selected, nothing restored')
             return
     else:
-        restorable = [d for d, m in list_snapshots(dest) if m is not None]
-        if not restorable:
+        newest = next((d for d in snapshot_dirs(dest) if read_manifest(d) is not None), None)
+        if newest is None:
             print(f'{red("safekeep:")} no restorable snapshots at {cyan(str(dest))}', file=sys.stderr)
             print(f'  take one: {cyan(f"{safekeep_for(config_path)} backup run")}', file=sys.stderr)
             sys.exit(1)
-        date = restorable[0].name
+        date = newest.name
 
     snapshot_dir = resolve_snapshot(dest, date)
     manifest = read_manifest(snapshot_dir) if snapshot_dir else None
