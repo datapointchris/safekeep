@@ -61,9 +61,10 @@ it opens fzf pickers instead. A selection that matches nothing exits 1.
   command out of the output, and the test executes it.
   `test_every_help_example_names_commands_and_flags_safekeep_has` runs every help example with
   `-h` appended.
-- Errors go to stderr, prefixed `safekeep:`, and a miss exits 1. A usage error is `ctx.fail` in
-  `main.py`, exits 2, and names the command that gets past it. An fzf preview pane shows stderr
-  and a failed exit, so a command that doubles as a pane needs no exception.
+- Errors go to stderr, prefixed `safekeep:`, and a miss exits 1. A usage error exits 2 and names
+  the command that gets past it. In `main.py` it is `ctx.fail`. In `__init__.py` it prints its own
+  `safekeep:` line to stderr and calls `sys.exit(2)`. An fzf preview pane shows stderr and a
+  failed exit, so a command that doubles as a pane needs no exception.
 - An option on the wrong side of a command word is caught before click parses: a verb's option
   before the verb by `Namespace.parse_args`, and a root option after the command by
   `InWorkflowOrder.parse_args`. Each prints the line with the option moved.
