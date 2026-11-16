@@ -62,7 +62,7 @@ Config files live in `$XDG_CONFIG_HOME/safekeep/`, which is `~/.config/safekeep/
 
 `tomllib` reads but cannot write, so `init` emits a hand-authored template rather than serializing a dict — which is the better half of the trade, since a serialized dict cannot carry comments. `CONFIG_TEMPLATE` in `src/safekeep/__init__.py` is that file.
 
-**The `[git]` keys must precede the first `[[git.repos]]` block.** TOML closes a table as soon as a subtable opens, so a `back_up_untracked_files` written after the repo blocks is read as part of the last repo. This fails loudly rather than silently, but it is the one ordering constraint the format imposes here.
+**The `[git]` keys must precede the first `[[git.repos]]` block.** TOML closes a table as soon as a subtable opens, so a `back_up_untracked_files` written after the repo blocks is read as part of the last repo. safekeep reads only `path` and `tags` from a repo block, so that key is ignored without a warning and the `[git]` default applies. `safekeep config show` marks the setting as a default, which is where the misplaced key shows. This is the one ordering constraint the format imposes here.
 
 **Keys:**
 
