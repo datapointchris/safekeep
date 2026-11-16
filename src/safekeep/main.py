@@ -10,13 +10,11 @@ import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Annotated
 from typing import Any
 
 import typer
-from pyselfupdate import Config
-from pyselfupdate import notify
-from pyselfupdate.typercmd import run_update
 from typer.core import TyperGroup
 
 from safekeep import CONFIG_TEMPLATE
@@ -44,10 +42,33 @@ from safekeep import show_tag_list
 from safekeep import snapshot_choices
 from safekeep import tool_version
 
-# Notify-only: one check per 24h, one line to stderr, and `safekeep update` is the only thing that
-# writes anything. The notice and the command share this config so the notice cannot name a release
-# the command would not install.
-UPDATE_CONFIG = Config(tool='safekeep', owner='datapointchris')
+if TYPE_CHECKING:
+    import pyselfupdate
+
+
+def update_config() -> 'pyselfupdate.Config':
+    """What `safekeep update` installs and what the daily notice compares against.
+
+    Notify-only: one check per 24h, one line to stderr, and `safekeep update` is the only thing
+    that writes anything. The notice and the command share this config so the notice cannot name
+    a release the command would not install.
+    """
+    # 161ms → 105ms on `import safekeep.main`, 2026-11-16
+    import pyselfupdate
+
+    return pyselfupdate.Config(tool='safekeep', owner='datapointchris')
+
+
+def on_a_terminal() -> bool:
+    """Whether stdout and stderr are both terminals, the only case the update notice prints in.
+
+    Tested here, before pyselfupdate is imported, so a piped or scripted run never loads it.
+    """
+    try:
+        return sys.stdout.isatty() and sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
 
 # The rehearsal directory as a command line carries it: under ~ where it can be, so it reads short.
 REHEARSE_INTO = shell_path(str(REHEARSAL_ROOT))
@@ -216,8 +237,11 @@ def root(
         typer.echo(ctx.get_help())
         raise typer.Exit(2)
     # `update` runs its own check, so a notice too would ask the releases API twice for one command.
-    if ctx.invoked_subcommand != 'update':
-        notify(UPDATE_CONFIG)
+    if ctx.invoked_subcommand != 'update' and on_a_terminal():
+        # 161ms → 105ms on `import safekeep.main`, 2026-11-16
+        from pyselfupdate import notify
+
+        notify(update_config())
 
 
 DryRunOption = Annotated[bool, typer.Option('--dry-run', '-n', help='Show what would be done, change nothing')]
@@ -690,7 +714,10 @@ def update(
     skip_changelog: Annotated[bool, typer.Option('--no-changelog', help='Do not list the commits between versions')] = False,
 ) -> None:
     """Install the newest release."""
-    run_update(UPDATE_CONFIG, check_only=check_only, skip_changelog=skip_changelog)
+    # 161ms → 105ms on `import safekeep.main`, 2026-11-16
+    from pyselfupdate.typercmd import run_update
+
+    run_update(update_config(), check_only=check_only, skip_changelog=skip_changelog)
 
 
 def main() -> None:
