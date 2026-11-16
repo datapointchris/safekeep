@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 from enum import StrEnum
 from fnmatch import fnmatch
+from fnmatch import translate as fnmatch_translate
 from functools import cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_version
@@ -599,13 +600,20 @@ def git_ls_ignored(repo_path, patterns):
     return matched
 
 
-def matches_exclude(rel_path, excludes):
-    """Check if any path component matches an exclude pattern."""
-    for part in Path(rel_path).parts:
-        for pattern in excludes:
-            if fnmatch(part, pattern):
-                return True
-    return False
+def exclude_pattern(excludes):
+    """The exclude globs as one compiled pattern, matching a name any one of them matches.
+
+    Built once per walk rather than once per name, because a backup tests every file and
+    directory name it sees. An empty list matches nothing.
+    """
+    if not excludes:
+        return re.compile(r'(?!)')
+    return re.compile('|'.join(fnmatch_translate(pattern) for pattern in excludes))
+
+
+def matches_exclude(rel_path, exclude):
+    """Check if any path component matches the compiled exclude pattern."""
+    return any(exclude.match(part) for part in Path(rel_path).parts)
 
 
 def snapshot_rel(path):
@@ -650,6 +658,7 @@ def survey_tree(root, excludes, max_size_mb):
         record_file(root, survey, max_size_mb)
         return survey
 
+    exclude = exclude_pattern(excludes)
     seen_dirs = set()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         current = Path(dirpath)
@@ -659,7 +668,7 @@ def survey_tree(root, excludes, max_size_mb):
             continue
         seen_dirs.add(resolved)
 
-        dirnames[:] = [d for d in dirnames if not matches_exclude(d, excludes)]
+        dirnames[:] = [d for d in dirnames if not matches_exclude(d, exclude)]
 
         try:
             dir_mode = current.stat().st_mode & 0o777
@@ -678,7 +687,7 @@ def survey_tree(root, excludes, max_size_mb):
                 survey['symlinks'][snapshot_rel(child)] = os.readlink(child)
 
         for name in filenames:
-            if matches_exclude(name, excludes):
+            if matches_exclude(name, exclude):
                 continue
             child = current / name
             if child.is_symlink():
@@ -2655,6 +2664,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
     start_time = time.monotonic()
     dest = Path(config['back_up_to']).expanduser()
     excludes = config.get('skip_names_matching', DEFAULT_SKIP_NAMES)
+    exclude = exclude_pattern(excludes)
     max_size_mb = config.get('skip_files_over_mb')
 
     # Checked against the nearest directory that exists, so a dry run can answer without creating it.
@@ -2740,7 +2750,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
             untracked = git_ls_untracked(repo_path)
             if untracked is None:
                 continue
-            filtered = [f for f in untracked if not matches_exclude(str(f), excludes)]
+            filtered = [f for f in untracked if not matches_exclude(str(f), exclude)]
             survey = survey_files(filtered, max_size_mb)
             merge_survey(manifest, survey)
             skipped = {snapshot_rel(s['path']) for s in survey['skipped_large']}
@@ -2767,7 +2777,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
             if not repo_path.exists():
                 continue
             ignored = git_ls_ignored(repo_path, ignored_patterns)
-            filtered = [f for f in ignored if not matches_exclude(str(f), excludes)]
+            filtered = [f for f in ignored if not matches_exclude(str(f), exclude)]
             if not filtered:
                 continue
             survey = survey_files(filtered, max_size_mb)
