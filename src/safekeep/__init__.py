@@ -1453,13 +1453,28 @@ def snapshot_files(snapshot_dir, manifest, unreadable):
     path is remapped through this machine's home, which is what lets a file from a WSL image with
     another username be recognized as the one this machine lacks. A directory the walk cannot
     list goes into `unreadable`.
+
+    Every path is a plain string. A listing reads every copy in every snapshot and keeps only the
+    newest of each, so the walk builds nothing a discarded older copy would pay for.
     """
     home_then = manifest.get('home')
     home_now = str(Path.home())
+
+    def note(error):
+        unreadable.append(error.filename)
+
     for row in source_rows(manifest.get('groups', [])):
-        for origin, is_dir in stored_paths(snapshot_dir, row['source'], unreadable):
-            if not is_dir:
-                yield remap_home(str(origin), home_then, home_now), str(origin), snapshot_dir / snapshot_rel(origin)
+        source = str(Path(row['source']))
+        stored = os.path.join(snapshot_dir, snapshot_rel(source))
+        if os.path.isfile(stored):
+            yield remap_home(source, home_then, home_now), source, stored
+            continue
+        for dirpath, _, filenames in os.walk(stored, onerror=note):
+            relative = os.path.relpath(dirpath, stored)
+            base = source if relative == '.' else os.path.join(source, relative)
+            for name in filenames:
+                origin = os.path.join(base, name)
+                yield remap_home(origin, home_then, home_now), origin, os.path.join(dirpath, name)
 
 
 def newest_copies(snapshots, progress):
@@ -1483,9 +1498,9 @@ def newest_copies(snapshots, progress):
             if path in copies:
                 continue
             try:
-                size = stored.stat().st_size
+                size = os.stat(stored).st_size
             except OSError:
-                unreadable.append(str(stored))
+                unreadable.append(stored)
                 continue
             copies[path] = {
                 'path': path,
@@ -1495,7 +1510,7 @@ def newest_copies(snapshots, progress):
                 'label': manifest.get('label'),
                 'host': manifest.get('hostname'),
                 'bytes': size,
-                'stored': str(stored),
+                'stored': stored,
             }
     if progress:
         clear_status()
