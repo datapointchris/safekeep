@@ -18,6 +18,7 @@ import typer
 from typer.core import TyperGroup
 
 from safekeep import CONFIG_TEMPLATE
+from safekeep import DEFAULT_CONFLICT_POLICY
 from safekeep import REHEARSAL_ROOT
 from safekeep import BackupRequest
 from safekeep import ConflictPolicy
@@ -567,7 +568,7 @@ def restore(
     on_conflict: Annotated[
         ConflictPolicy,
         typer.Option('--on-conflict', metavar='POLICY', help=f'What to do with a file already at the target: {", ".join(ConflictPolicy)}'),
-    ] = ConflictPolicy.BACKUP,
+    ] = DEFAULT_CONFLICT_POLICY,
     skip_symlinked: Annotated[
         bool, typer.Option('--skip-symlinked', help='Skip paths that were symlinks when backed up, or sat under one')
     ] = False,

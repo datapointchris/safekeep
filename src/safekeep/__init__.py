@@ -251,6 +251,10 @@ class ConflictPolicy(StrEnum):
     ASK = 'ask'
 
 
+# The policy `restore` applies without `--on-conflict`, and the one a printed restore leaves unsaid.
+DEFAULT_CONFLICT_POLICY = ConflictPolicy.BACKUP
+
+
 @dataclass(frozen=True)
 class BackupRequest:
     """What one `backup run` was asked to cover."""
@@ -2212,7 +2216,7 @@ def restore_command(request: RestoreRequest, config_path, from_snapshot=None):
     for tag in request.tag:
         selection += ['--tag', shlex.quote(tag)]
     words += selection or ['--all']
-    if request.on_conflict != ConflictPolicy.BACKUP:
+    if request.on_conflict != DEFAULT_CONFLICT_POLICY:
         words += ['--on-conflict', request.on_conflict.value]
     if request.skip_symlinked:
         words.append('--skip-symlinked')
@@ -2229,7 +2233,7 @@ def rehearsal_request(tags=(), sources=()):
         all=False,
         source=list(sources),
         tag=list(tags),
-        on_conflict=ConflictPolicy.BACKUP,
+        on_conflict=DEFAULT_CONFLICT_POLICY,
         skip_symlinked=False,
         dry_run=False,
         no_input=False,
@@ -2314,7 +2318,7 @@ def do_restore(config, config_path, request: RestoreRequest):
     if request.on_conflict == ConflictPolicy.ASK and not can_prompt(request.no_input):
         print(f'{red("safekeep:")} {cyan("--on-conflict ask")} has to be answered, and this run cannot ask', file=sys.stderr)
         policies = ', '.join(cyan(policy) for policy in ConflictPolicy if policy != ConflictPolicy.ASK)
-        print(f'  decide up front instead: {policies} — {cyan("backup")} is the default', file=sys.stderr)
+        print(f'  decide up front instead: {policies} — {cyan(DEFAULT_CONFLICT_POLICY)} is the default', file=sys.stderr)
         sys.exit(2)
 
     if request.from_date:
