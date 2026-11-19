@@ -1514,6 +1514,27 @@ def test_a_long_label_is_clipped_on_a_terminal(tmp_path, source_tree):
     assert LONG_LABEL not in row
 
 
+class Terminal:
+    @staticmethod
+    def isatty():
+        return True
+
+
+@pytest.mark.parametrize(
+    ('columns', 'label', 'beneath'),
+    [
+        pytest.param(80, 'before the wsl move', True, id='80 columns leave too little room to read it'),
+        pytest.param(140, 'before the wsl move', False, id='a wide terminal fits it on the row'),
+        pytest.param(80, 'why', False, id='a label that fits the room left stays on the row'),
+    ],
+)
+def test_a_label_the_row_would_cut_past_reading_goes_beneath_it(monkeypatch, columns, label, beneath):
+    """A timestamped row with a short host fills 62 columns before its label."""
+    monkeypatch.setattr(sys, 'stdout', Terminal())
+    monkeypatch.setattr(shutil, 'get_terminal_size', lambda: os.terminal_size((columns, 24)))
+    assert safekeep.label_goes_beneath(label, 62) is beneath
+
+
 def test_a_restore_names_the_label_of_the_snapshot_it_reads(tmp_path, source_tree):
     """A date says when a snapshot was taken and nothing about why, which is the question being
     answered when an older one is picked on purpose."""

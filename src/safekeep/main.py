@@ -6,6 +6,7 @@ usage error. Each command here is a thin wrapper: it resolves the config and han
 fails the type check rather than a run.
 """
 
+import re
 import shlex
 import sys
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from typing import Annotated
 from typing import Any
 
 import typer
+from pytermstyle import cyan
+from pytermstyle import red
 from typer.core import TyperGroup
 
 from safekeep import CONFIG_TEMPLATE
@@ -45,6 +48,13 @@ from safekeep import tool_version
 
 if TYPE_CHECKING:
     import pyselfupdate
+
+REPOSITORY = 'https://github.com/datapointchris/safekeep'
+
+
+def install_release_command(version: str) -> str:
+    """The `uv tool install` that puts `version` back as a uv tool `safekeep update` can update."""
+    return f'uv tool install {shlex.quote(f"safekeep @ git+{REPOSITORY}@v{version}")}'
 
 
 def update_config() -> 'pyselfupdate.Config':
@@ -716,7 +726,20 @@ def update(
 ) -> None:
     """Install the newest release."""
     # 161ms → 105ms on `import safekeep.main`, 2026-11-16
+    import pyselfupdate
     from pyselfupdate.typercmd import run_update
+
+    # pyselfupdate's own hint names a bare `uv tool install safekeep`, which asks PyPI, where
+    # safekeep is a different project. A tagged install from the repository runs anywhere.
+    try:
+        pyselfupdate.read_installation('safekeep')
+    except pyselfupdate.NotInstalledError:
+        version = tool_version()
+        print(f'{red("safekeep:")} not installed as a uv tool, so it cannot update itself', file=sys.stderr)
+        if re.fullmatch(r'\d+\.\d+\.\d+', version):
+            print(f'  install this release: {cyan(install_release_command(version))}', file=sys.stderr)
+        print(f'  every way to install: {cyan(f"{REPOSITORY}#install")}', file=sys.stderr)
+        raise typer.Exit(1) from None
 
     run_update(update_config(), check_only=check_only, skip_changelog=skip_changelog)
 

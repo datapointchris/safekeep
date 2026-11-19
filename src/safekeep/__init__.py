@@ -1102,6 +1102,22 @@ def counted(count, noun, width):
     return f'{count:>{width}} {noun if count == 1 else noun + "s":<{len(noun) + 1}}'
 
 
+LABEL_ROOM_FLOOR = 20
+LABEL_INDENT = '    '
+
+
+def label_goes_beneath(label, used):
+    """Whether a snapshot's label prints on its own line under the row rather than at the end of it.
+
+    Only on a terminal, where a width exists to fit: a label that fits its row stays there, and
+    one that would be cut to fewer than LABEL_ROOM_FLOOR columns moves under the row whole.
+    """
+    if not sys.stdout.isatty():
+        return False
+    room = shutil.get_terminal_size().columns - used
+    return len(label) > room and room < LABEL_ROOM_FLOOR
+
+
 def show_snapshot_list(dest, config_path, as_json=False):
     snapshots = list_snapshots(dest)
     if as_json:
@@ -1136,9 +1152,12 @@ def show_snapshot_list(dest, config_path, as_json=False):
         # a row that wraps is two rows, and a column of dates stops being scannable the moment
         # one of them is not at the left. On a terminal only, because a redirected run has no
         # width to fit and loses data if one is assumed. clip measures uncolored text, which is
-        # what `cells` is for.
-        if summary['label']:
-            row += '  ' + green(clip_to_terminal(summary['label'], len(cells) + 4))
+        # what `cells` is for. Where too little room is left to read it, it goes on the next line.
+        label = summary['label']
+        if label and label_goes_beneath(label, len(cells) + 4):
+            row += '\n' + LABEL_INDENT + green(clip_to_terminal(label, len(LABEL_INDENT)))
+        elif label:
+            row += '  ' + green(clip_to_terminal(label, len(cells) + 4))
         print(row)
 
 
