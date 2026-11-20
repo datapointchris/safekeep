@@ -935,7 +935,7 @@ def run_rsync_naming_files(cmd, report):
 
 
 def read_manifest(snapshot_dir):
-    """Read a snapshot's manifest, or None if it has none."""
+    """Read a snapshot's manifest, or None if it has none or it cannot be read; `manifest_problem` says which."""
     manifest_path = Path(snapshot_dir) / MANIFEST_NAME
     if not manifest_path.exists():
         return None
@@ -944,6 +944,25 @@ def read_manifest(snapshot_dir):
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def manifest_problem(snapshot_dir):
+    """What reading a snapshot's manifest met, for a snapshot `read_manifest` returned None for.
+
+    An absent manifest and one that is present but cannot be opened or parsed are different
+    failures with different remedies, so this reads the file again and reports what it saw.
+    """
+    manifest_path = Path(snapshot_dir) / MANIFEST_NAME
+    if not manifest_path.exists():
+        return 'no manifest'
+    try:
+        with open(manifest_path) as f:
+            json.load(f)
+    except OSError as error:
+        return f'manifest {manifest_path} cannot be opened: {error.strerror or error}'
+    except json.JSONDecodeError as error:
+        return f'manifest {manifest_path} is not valid JSON: {error}'
+    return f'manifest {manifest_path} holds JSON null'
 
 
 def snapshot_dirs(dest):
@@ -990,10 +1009,10 @@ def snapshot_choices(dest, config_path):
 
 
 def unreadable_reason(dest, wanted, snapshot_dir, config_path):
-    """Why one snapshot cannot be read: absent, with the ones there are, or present without a manifest."""
+    """Why one snapshot cannot be read: absent, with the ones there are, or present with a manifest missing or unreadable."""
     if snapshot_dir is None:
         return f'no snapshot {wanted} at {dest}\n{snapshot_choices(dest, config_path)}'
-    return f'snapshot {snapshot_dir.name} has no manifest, so safekeep can neither read nor restore it'
+    return f'snapshot {snapshot_dir.name}: {manifest_problem(snapshot_dir)}, so safekeep can neither read nor restore it'
 
 
 def fail_unreadable(dest, wanted, snapshot_dir, config_path) -> NoReturn:
@@ -1139,7 +1158,7 @@ def show_snapshot_list(dest, config_path, as_json=False):
         name = f'{snapshot_dir.name:<{width}}'
         summary = snapshot_summary(snapshot_dir, manifest)
         if not summary['restorable']:
-            print(f'  {bold(name)}  {yellow("no manifest, so safekeep can neither read nor restore it")}')
+            print(f'  {bold(name)}  {yellow(f"{manifest_problem(snapshot_dir)}, so safekeep can neither read nor restore it")}')
             continue
         host = summary['host'] or '?'
         sizes = (

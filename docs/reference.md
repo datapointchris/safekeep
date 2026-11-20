@@ -181,7 +181,7 @@ anything, and never edit inside the destination. Restore only ever reads, so it 
 
 **Symlinks** are dereferenced on backup (`rsync --copy-links`) so a snapshot holds real content rather than links that break when the source machine is lost. The manifest records that the source *was* a symlink and where it pointed, so restore can report which restored files should be links and offer `--skip-symlinked`.
 
-A snapshot with no manifest cannot be restored by safekeep — it says so and points at rsync.
+A snapshot whose manifest is missing, cannot be opened or is not valid JSON cannot be restored by safekeep. It names which of those it met and points at rsync.
 
 ## Backup
 
