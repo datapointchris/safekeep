@@ -539,6 +539,20 @@ def git_env():
     return {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
 
 
+def git_failure(error):
+    """What git, or the OS starting it, said when a listing failed.
+
+    A directory that is not a repo, a git that is not installed, and a git that fails inside a
+    repo each need a different remedy, so the warning carries the reason as it was reported
+    rather than one sentence covering all three.
+    """
+    if isinstance(error, subprocess.CalledProcessError):
+        # Joined onto one line, so a multi-line message stays inside the indented warning.
+        stderr = ' '.join(line.strip() for line in (error.stderr or '').splitlines() if line.strip())
+        return stderr or f'git exited with status {error.returncode}'
+    return f'{error.strerror}: {error.filename}'
+
+
 def git_ls_untracked(repo_path):
     """The untracked files in a git repository, or None when git cannot list them.
 
@@ -555,8 +569,8 @@ def git_ls_untracked(repo_path):
             env=git_env(),
         )
         return [repo_path / line for line in result.stdout.strip().splitlines() if line]
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print(f'  {yellow("warning:")} could not list untracked files in {cyan(str(repo_path))}')
+    except (subprocess.CalledProcessError, FileNotFoundError) as error:
+        print(f'  {yellow("warning:")} could not list untracked files in {cyan(str(repo_path))}: {git_failure(error)}')
         return None
 
 
@@ -584,8 +598,8 @@ def git_ls_ignored(repo_path, patterns):
             check=True,
             env=git_env(),
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print(f'  {yellow("warning:")} could not list ignored files in {cyan(str(repo_path))}')
+    except (subprocess.CalledProcessError, FileNotFoundError) as error:
+        print(f'  {yellow("warning:")} could not list ignored files in {cyan(str(repo_path))}: {git_failure(error)}')
         return []
 
     all_files = set(all_result.stdout.strip().splitlines())
@@ -2950,7 +2964,10 @@ def edit_config(config_path):
         print(f'{red("safekeep:")} editor not found: {yellow(parts[0])}', file=sys.stderr)
         sys.exit(1)
 
-    subprocess.run([binary, *parts[1:], str(config_path)], check=False)
+    # The read-back still runs after a failed editor, because the file may hold edits it saved.
+    status = subprocess.run([binary, *parts[1:], str(config_path)], check=False).returncode
+    if status != 0:
+        print(f'{yellow("safekeep:")} editor {yellow(parts[0])} exited with status {status}', file=sys.stderr)
 
     config, warnings = load_config(config_path)
     entries = normalize_entries(config.get('back_up_paths', []))
