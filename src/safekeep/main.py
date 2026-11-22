@@ -26,6 +26,7 @@ from safekeep import REHEARSAL_ROOT
 from safekeep import BackupRequest
 from safekeep import ConflictPolicy
 from safekeep import RestoreRequest
+from safekeep import destination
 from safekeep import do_backup
 from safekeep import do_restore
 from safekeep import edit_config
@@ -209,10 +210,6 @@ def loaded(ctx: typer.Context):
     config_path = config_file(ctx)
     config, warnings = load_config(config_path)
     return config_path, config, warnings
-
-
-def destination(config) -> Path:
-    return Path(config['back_up_to']).expanduser()
 
 
 def version_callback(asked: bool) -> None:

@@ -483,6 +483,15 @@ def load_config(config_path):
     return config, warnings
 
 
+def destination(config) -> Path:
+    """The directory holding the snapshots: the config's `back_up_to`, with `~` expanded.
+
+    Every command that reads or writes snapshots resolves it here, so they all agree on where
+    the snapshots are.
+    """
+    return Path(config['back_up_to']).expanduser()
+
+
 def repo_entries(config):
     """Return the repos and what to take from each, as ([(path, tags)], untracked, patterns)."""
     repos = config.get('git', {})
@@ -1372,7 +1381,7 @@ def resolve_tag_index(config, config_path, from_date: str | None):
     Both verbs read the config and one snapshot together, and both report which snapshot they
     sized against — so the resolution is here rather than duplicated in each.
     """
-    dest = Path(config['back_up_to']).expanduser()
+    dest = destination(config)
     snapshot_dir, manifest = snapshot_to_size_against(dest, from_date, config_path)
     return tag_index(config, snapshot_sources(manifest)), dest, snapshot_dir
 
@@ -1612,7 +1621,7 @@ def safekeep_for(config_path):
 
 def show_files(config, config_path, missing: bool, from_date: str | None, as_json: bool):
     """Every file the snapshots hold, one line each, grouped under the newest snapshot holding it."""
-    dest = Path(config['back_up_to']).expanduser()
+    dest = destination(config)
     snapshots = restorable_snapshots(dest, from_date, config_path)
     copies, unreadable = newest_copies(snapshots, progress=not as_json)
     rows = sorted(copies.values(), key=lambda row: row['path'])
@@ -2380,7 +2389,7 @@ def do_restore(config, config_path, request: RestoreRequest):
     manifest cannot be read, the selection cannot be asked for, or an explicit selection matches
     nothing. A quit at the conflict prompt keeps the sources already restored and ends normally.
     """
-    dest = Path(config['back_up_to']).expanduser()
+    dest = destination(config)
 
     if request.on_conflict == ConflictPolicy.ASK and not can_prompt(request.no_input):
         print(f'{red("safekeep:")} {cyan("--on-conflict ask")} has to be answered, and this run cannot ask', file=sys.stderr)
@@ -2742,7 +2751,7 @@ def do_backup(config, config_path, warnings, request: BackupRequest):
             print(f'  every source matches {matching}, so this snapshot is a full one', flush=True)
 
     start_time = time.monotonic()
-    dest = Path(config['back_up_to']).expanduser()
+    dest = destination(config)
     excludes = config.get('skip_names_matching', DEFAULT_SKIP_NAMES)
     exclude = exclude_pattern(excludes)
     max_size_mb = config.get('skip_files_over_mb')
